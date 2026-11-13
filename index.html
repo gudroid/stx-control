@@ -284,8 +284,9 @@ const OP = { READ:3, WRITE:0, LIST:1 };
 const P = { SOURCE:0, PLAYPAUSE:1, PREV:2, NEXT:3, PREVFOLDER:4, NEXTFOLDER:5,
             SELECT_ID:8, MODE:12, LIST:53, HALFSEEK:48 };
 
-let dev=null, gatt=null, chWrite=null, chNotify=null, writeNoResp=false;
-let connected=false;
+let dev=null, gatt=null, chWrite=null, chNotify=null, canWR=false;
+let connected=false, manualDisc=false, reconnecting=false;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 /* ---------- util ---------- */
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
@@ -303,48 +304,88 @@ function pkt(cmdName, op){
 }
 
 /* ---------- BLE ---------- */
-async function connect(){
+function bindDevice(d){
+  dev=d;
+  try{d.removeEventListener('gattserverdisconnected',onDrop);}catch(e){}
+  d.addEventListener('gattserverdisconnected',onDrop);
+}
+async function pickAndConnect(){
   if(!navigator.bluetooth){toast('Este navegador não tem Bluetooth. Use o Chrome no Android.','bad');return;}
+  manualDisc=false;
   try{
     setState('mid','Procurando aparelho...');
-    dev=await navigator.bluetooth.requestDevice({
-      acceptAllDevices:true, optionalServices:[SVC,OAD]
-    });
-    dev.addEventListener('gattserverdisconnected',onDrop);
-    setState('mid','Conectando...');
-    gatt=await dev.gatt.connect();
-    const svc=await gatt.getPrimaryService(SVC);
-    const chars=await svc.getCharacteristics();
-    for(const c of chars){
-      const p=c.properties;
-      if((p.write||p.writeWithoutResponse)&&!chWrite){chWrite=c;writeNoResp=p.writeWithoutResponse&&!p.write;}
-      if(p.notify||p.indicate){chNotify=c;}
-    }
-    if(!chWrite){throw new Error('Canal de escrita não encontrado neste aparelho.');}
-    if(chNotify){await chNotify.startNotifications();
-      chNotify.addEventListener('characteristicvaluechanged',onNotify);}
-    connected=true; setState('on','Conectado a '+(dev.name||'processador'));
-    $('#btnDisconnect').disabled=false; $('#devCard').style.display='block';
-    $('#devInfo').innerHTML=`<div class="item"><div class="ic">📡</div><div class="mt"><b>${dev.name||'Processador STX'}</b><small>Conectado · escrita ${writeNoResp?'sem':'com'} resposta</small></div></div>`;
-    logLine('rx','CONECTADO',(dev.name||'')+' · write='+chWrite.uuid.slice(0,8)+(chNotify?' notify='+chNotify.uuid.slice(0,8):' (sem notify)'));
-    toast('Conectado! ✅','ok');
-    setTimeout(()=>{readVersion();},400);
+    const d=await navigator.bluetooth.requestDevice({acceptAllDevices:true, optionalServices:[SVC,OAD]});
+    localStorage.setItem('stx_devid', d.id);
+    bindDevice(d);
+    await doConnect();
   }catch(e){
-    logLine('er','ERRO',e.message);
-    setState('off','Falha: '+e.message);
-    if(e.name!=='NotFoundError') toast('Falha ao conectar: '+e.message,'bad');
-    else setState('off','Desconectado.');
+    if(e.name==='NotFoundError'){setState('off','Desconectado.');}
+    else{logLine('er','ERRO',e.message);setState('off','Falha: '+e.message);toast('Falha ao conectar','bad');}
   }
 }
-function onDrop(){connected=false;chWrite=chNotify=gatt=null;
-  setState('off','Conexão perdida. Toque em Conectar.');$('#btnDisconnect').disabled=true;
-  logLine('er','DESCONECTADO','conexão perdida');toast('Conexão perdida','bad');}
-function disconnect(){if(dev&&dev.gatt.connected)dev.gatt.disconnect();onDrop();}
+async function doConnect(){
+  setState('mid','Conectando...');
+  gatt=await dev.gatt.connect();
+  const svc=await gatt.getPrimaryService(SVC);
+  const chars=await svc.getCharacteristics();
+  chWrite=chNotify=null;
+  for(const c of chars){
+    const p=c.properties;
+    if((p.write||p.writeWithoutResponse)&&!chWrite){chWrite=c; canWR=!!p.write;}
+    if((p.notify||p.indicate)&&!chNotify){chNotify=c;}
+  }
+  if(!chWrite){throw new Error('Canal de escrita não encontrado.');}
+  if(chNotify){
+    await chNotify.startNotifications();
+    try{chNotify.removeEventListener('characteristicvaluechanged',onNotify);}catch(e){}
+    chNotify.addEventListener('characteristicvaluechanged',onNotify);
+  }
+  connected=true; reconnecting=false;
+  setState('on','Conectado a '+(dev.name||'processador'));
+  $('#btnDisconnect').disabled=false; $('#devCard').style.display='block';
+  $('#devInfo').innerHTML=`<div class="item"><div class="ic">📡</div><div class="mt"><b>${dev.name||'Processador STX'}</b><small>Conectado · envio ${canWR?'com':'sem'} resposta</small></div></div>`;
+  logLine('rx','CONECTADO',(dev.name||'')+' · write='+chWrite.uuid.slice(0,8)+(chNotify?' notify='+chNotify.uuid.slice(0,8):' (sem notify)'));
+  toast('Conectado! ✅','ok');
+  setTimeout(()=>{readVersion();},400);
+}
+function onDrop(){
+  connected=false; chWrite=chNotify=null;
+  $('#btnDisconnect').disabled=true;
+  if(manualDisc){setState('off','Desconectado.');return;}
+  logLine('in','QUEDA','reconectando automaticamente...');
+  tryReconnect();
+}
+async function tryReconnect(){
+  if(reconnecting||!dev||manualDisc) return;
+  reconnecting=true; let n=0;
+  while(!connected && !manualDisc && n<600){
+    n++; setState('mid','Reconectando ('+n+')...');
+    try{ await doConnect(); toast('Reconectado ✅','ok'); reconnecting=false; return; }
+    catch(e){ await sleep(2500); }
+  }
+  reconnecting=false;
+}
+async function restoreOnLoad(){
+  if(!navigator.bluetooth||!navigator.bluetooth.getDevices) return;
+  try{
+    const devs=await navigator.bluetooth.getDevices();
+    if(!devs||!devs.length) return;
+    const id=localStorage.getItem('stx_devid');
+    const d=devs.find(x=>x.id===id)||devs[0];
+    if(d){ bindDevice(d); manualDisc=false;
+      logLine('in','SALVO','aparelho lembrado: '+(d.name||d.id.slice(0,8))+' — religando quando estiver por perto');
+      tryReconnect(); }
+  }catch(e){}
+}
+function disconnect(){manualDisc=true;reconnecting=false;
+  if(dev&&dev.gatt&&dev.gatt.connected)dev.gatt.disconnect();
+  connected=false;$('#btnDisconnect').disabled=true;setState('off','Desconectado.');}
 
 async function send(b, tag){
   if(!connected||!chWrite){toast('Conecte primeiro.','bad');return;}
   try{
-    if(writeNoResp)await chWrite.writeValueWithoutResponse(b);
+    if(canWR && chWrite.writeValueWithResponse) await chWrite.writeValueWithResponse(b);
+    else if(chWrite.writeValueWithoutResponse) await chWrite.writeValueWithoutResponse(b);
     else await chWrite.writeValue(b);
     logLine('tx','TX'+(tag?'·'+tag:''),hex(b));
   }catch(e){logLine('er','ERRO TX',e.message);toast('Erro ao enviar','bad');}
@@ -555,7 +596,7 @@ function tab(name){$$('.page').forEach(p=>p.classList.remove('show'));
   $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.tab===name));window.scrollTo(0,0);}
 
 /* ---------- wiring ---------- */
-$('#btnConnect').onclick=connect;
+$('#btnConnect').onclick=pickAndConnect;
 $('#btnDisconnect').onclick=disconnect;
 $('#btnReadVersion').onclick=readVersion;
 $('#btnReadVolt').onclick=readVolt;
@@ -575,6 +616,7 @@ $$('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
 
 buildSources();renderFavs();renderPlaylists();renderCrumbs();
 logLine('in','PRONTO','STX Control carregado. Conecte o processador para começar.');
+restoreOnLoad();
 </script>
 </body>
 </html>
