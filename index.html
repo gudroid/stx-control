@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>STX Control · @guucds</title>
+<style>
+  :root{
+    --bg:#0a0b0f; --bg2:#12141c; --card:#161925; --card2:#1d2130;
+    --line:#262b3d; --txt:#e8ebf5; --mut:#8a90a6; --dim:#5a6076;
+    --neon:#00e0b8; --neon2:#12a6ff; --pink:#ff3d7f; --warn:#ffb020; --bad:#ff4d4d;
+    --ok:#1fd67a;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--txt);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    overscroll-behavior:none}
+  body{padding-bottom:84px}
+  .wrap{max-width:720px;margin:0 auto;padding:16px}
+  header{display:flex;align-items:center;gap:12px;padding:14px 16px;position:sticky;top:0;
+    background:linear-gradient(180deg,var(--bg) 70%,transparent);z-index:20;backdrop-filter:blur(6px)}
+  .logo{width:40px;height:40px;border-radius:11px;flex:none;
+    background:conic-gradient(from 210deg,var(--neon),var(--neon2),var(--pink),var(--neon));
+    display:flex;align-items:center;justify-content:center;font-weight:900;color:#06121a;font-size:18px;
+    box-shadow:0 0 22px rgba(0,224,184,.35)}
+  .brand b{font-size:16px;letter-spacing:.3px}
+  .brand small{display:block;color:var(--mut);font-size:11px;margin-top:1px;letter-spacing:.5px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--dim);flex:none;margin-left:auto;
+    box-shadow:0 0 0 0 rgba(0,0,0,0)}
+  .dot.on{background:var(--ok);box-shadow:0 0 10px var(--ok)}
+  .dot.mid{background:var(--warn);box-shadow:0 0 10px var(--warn)}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px;margin:12px 0}
+  .card h3{margin:0 0 12px;font-size:13px;letter-spacing:.8px;color:var(--mut);text-transform:uppercase;font-weight:700}
+  .row{display:flex;gap:10px;flex-wrap:wrap}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:10px}
+
+  button{font-family:inherit;cursor:pointer;border:none;border-radius:12px;color:var(--txt);
+    background:var(--card2);border:1px solid var(--line);padding:13px 14px;font-size:14px;font-weight:600;
+    transition:.12s;display:flex;align-items:center;justify-content:center;gap:7px;min-height:46px}
+  button:active{transform:scale(.96)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  button.primary{background:linear-gradient(135deg,var(--neon),var(--neon2));color:#06121a;border:none;font-weight:800}
+  button.pink{background:linear-gradient(135deg,var(--pink),#ff7a4d);color:#fff;border:none}
+  button.ghost{background:transparent}
+  button.sq{aspect-ratio:1;min-height:0;font-size:20px;flex-direction:column;gap:2px}
+  button.sq small{font-size:9px;font-weight:600;color:var(--mut);letter-spacing:.3px}
+  button.primary.sq small,button.pink.sq small{color:rgba(0,0,0,.55)}
+  .seg{display:flex;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:4px;gap:4px}
+  .seg button{flex:1;min-height:40px;background:transparent;border:none;font-size:13px;padding:8px}
+  .seg button.sel{background:var(--card2);box-shadow:0 1px 0 rgba(255,255,255,.04)}
+
+  input[type=text],input[type=number],input[type=search]{width:100%;background:var(--bg2);border:1px solid var(--line);
+    color:var(--txt);border-radius:12px;padding:13px 14px;font-size:15px;font-family:inherit}
+  input::placeholder{color:var(--dim)}
+  label.fld{display:block;font-size:12px;color:var(--mut);margin:0 0 6px;letter-spacing:.3px}
+
+  .list{display:flex;flex-direction:column;gap:2px;max-height:360px;overflow:auto;margin:0 -4px}
+  .item{display:flex;align-items:center;gap:12px;padding:12px 12px;border-radius:11px;cursor:pointer}
+  .item:active{background:var(--card2)}
+  .item .ic{width:34px;height:34px;border-radius:9px;background:var(--bg2);display:flex;align-items:center;
+    justify-content:center;font-size:16px;flex:none}
+  .item.folder .ic{background:linear-gradient(135deg,#2a2f44,#1b2030);color:var(--neon2)}
+  .item .mt{flex:1;min-width:0}
+  .item .mt b{display:block;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .item .mt small{color:var(--dim);font-size:11px}
+  .item .star{color:var(--dim);font-size:16px;padding:6px}
+  .item .star.on{color:var(--warn)}
+  .item.playing{background:linear-gradient(90deg,rgba(0,224,184,.14),transparent);border:1px solid rgba(0,224,184,.3)}
+  .item.playing .mt b{color:var(--neon)}
+
+  .crumbs{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--mut);margin-bottom:10px;flex-wrap:wrap}
+  .crumbs span{cursor:pointer}.crumbs span:last-child{color:var(--txt)}
+  .crumbs i{color:var(--dim);font-style:normal}
+
+  .gauge{text-align:center;padding:6px 0}
+  .gauge .v{font-size:44px;font-weight:800;letter-spacing:-1px;font-variant-numeric:tabular-nums}
+  .gauge .v small{font-size:18px;color:var(--mut);font-weight:600}
+  .gauge .bar{height:10px;border-radius:6px;background:var(--bg2);overflow:hidden;margin:12px 0 4px;border:1px solid var(--line)}
+  .gauge .bar i{display:block;height:100%;border-radius:6px;transition:.4s;
+    background:linear-gradient(90deg,var(--bad),var(--warn) 45%,var(--ok))}
+
+  .np{display:flex;align-items:center;gap:14px;padding:14px;border-radius:14px;
+    background:linear-gradient(135deg,var(--card2),var(--card));border:1px solid var(--line);margin-bottom:12px}
+  .np .art{width:52px;height:52px;border-radius:12px;flex:none;
+    background:conic-gradient(from 0deg,var(--neon),var(--neon2),var(--pink),var(--neon));
+    display:flex;align-items:center;justify-content:center;font-size:24px;color:#06121a;animation:spin 6s linear infinite;animation-play-state:paused}
+  .np.play .art{animation-play-state:running}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .np .mt{flex:1;min-width:0}
+  .np .mt b{display:block;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .np .mt small{color:var(--mut);font-size:12px}
+
+  .log{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;background:#06070b;border:1px solid var(--line);
+    border-radius:12px;padding:10px;height:220px;overflow:auto;line-height:1.55;color:#aeb6cc}
+  .log .tx{color:var(--neon2)}.log .rx{color:var(--neon)}.log .er{color:var(--bad)}.log .in{color:var(--dim)}
+  .log b{color:#fff}
+
+  .tag{display:inline-block;font-size:10px;padding:3px 8px;border-radius:20px;background:var(--bg2);
+    color:var(--mut);border:1px solid var(--line);letter-spacing:.4px;margin-left:6px}
+  .tag.exp{color:var(--warn);border-color:rgba(255,176,32,.35)}
+  .hint{font-size:12px;color:var(--dim);line-height:1.5;margin:8px 0 0}
+  .empty{text-align:center;color:var(--dim);padding:28px 10px;font-size:13px}
+
+  nav{position:fixed;bottom:0;left:0;right:0;background:rgba(14,16,24,.92);backdrop-filter:blur(12px);
+    border-top:1px solid var(--line);display:flex;z-index:30;padding:6px 6px calc(6px + env(safe-area-inset-bottom))}
+  nav button{flex:1;background:none;border:none;flex-direction:column;gap:3px;font-size:10px;color:var(--mut);
+    min-height:54px;font-weight:600;padding:4px}
+  nav button .ni{font-size:19px}
+  nav button.sel{color:var(--neon)}
+  .page{display:none;animation:fade .2s}.page.show{display:block}
+  @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1}}
+  .toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%) translateY(20px);opacity:0;
+    background:var(--card2);border:1px solid var(--line);color:var(--txt);padding:11px 18px;border-radius:12px;
+    font-size:13px;z-index:50;transition:.25s;pointer-events:none;max-width:90%;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+  .toast.bad{border-color:var(--bad)} .toast.ok{border-color:var(--ok)}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">S</div>
+  <div class="brand"><b>STX Control</b><small>by @guucds</small></div>
+  <div class="dot" id="statusDot" title="desconectado"></div>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ CONECTAR ============ -->
+  <section class="page show" id="pg-conn">
+    <div class="card">
+      <h3>Conexão Bluetooth</h3>
+      <div id="connState" class="hint" style="margin:0 0 12px">Desconectado. Ligue o processador e toque em Conectar.</div>
+      <div class="row">
+        <button class="primary" style="flex:1" id="btnConnect">🔗 Conectar ao processador</button>
+        <button class="ghost" id="btnDisconnect" disabled>Desligar</button>
+      </div>
+      <p class="hint">⚠️ Use o <b>Google Chrome no Android</b> (ou no PC). O iPhone não permite Bluetooth no navegador.</p>
+    </div>
+
+    <div class="card" id="devCard" style="display:none">
+      <h3>Aparelho</h3>
+      <div id="devInfo" class="list" style="max-height:none"></div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnReadVersion" style="flex:1">Ler versão</button>
+        <button id="btnReadVolt" style="flex:1">Ler tensão</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PLAYER ============ -->
+  <section class="page" id="pg-player">
+    <div class="card">
+      <h3>Fonte de áudio</h3>
+      <div class="grid" id="sources"></div>
+      <p class="hint">Se a fonte não bater com o botão, me avise pelo Console qual número ligou o quê — ajusto rapidinho.</p>
+    </div>
+
+    <div class="card">
+      <div class="np" id="nowPlaying">
+        <div class="art">♪</div>
+        <div class="mt"><b id="npTitle">Nada tocando</b><small id="npSub">—</small></div>
+      </div>
+      <div class="grid" style="grid-template-columns:repeat(5,1fr)">
+        <button class="sq" data-act="prevFolder">⏮<small>PASTA</small></button>
+        <button class="sq" data-act="prev">⏪<small>ANT</small></button>
+        <button class="primary sq" data-act="playPause" id="btnPlay">⏯<small>PLAY</small></button>
+        <button class="sq" data-act="next">⏩<small>PRÓX</small></button>
+        <button class="sq" data-act="nextFolder">⏭<small>PASTA</small></button>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <div style="flex:1">
+          <label class="fld">Modo de reprodução</label>
+          <div class="seg" id="playMode">
+            <button data-mode="0" class="sel">Normal</button>
+            <button data-mode="1">Repetir 1</button>
+            <button data-mode="2">Repetir tudo</button>
+            <button data-mode="3">Aleatório</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>Ir direto pra música <span class="tag">por número</span></h3>
+      <div class="row">
+        <input type="number" id="jumpId" placeholder="Ex: 42" min="0" style="flex:1">
+        <button class="primary" id="btnJump" style="flex:none;padding:0 20px">Tocar</button>
+      </div>
+      <p class="hint">É assim que a busca e as playlists funcionam: cada música tem um número, e a gente pula direto nele.</p>
+    </div>
+  </section>
+
+  <!-- ============ PASTAS / BUSCA ============ -->
+  <section class="page" id="pg-browse">
+    <div class="card">
+      <h3>Buscar música</h3>
+      <input type="search" id="search" placeholder="🔍 Digite o nome da música ou pasta...">
+    </div>
+    <div class="card">
+      <div class="crumbs" id="crumbs"><span data-path="root">🏠 Início</span></div>
+      <div class="row" style="margin-bottom:10px">
+        <button id="btnLoadList" class="primary" style="flex:1">↻ Carregar lista do pen drive</button>
+      </div>
+      <div class="list" id="browseList">
+        <div class="empty">Toque em "Carregar lista" com o pen drive conectado ao processador.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ PLAYLISTS ============ -->
+  <section class="page" id="pg-playlists">
+    <div class="card">
+      <h3>Favoritas ⭐</h3>
+      <div class="list" id="favList"><div class="empty">Marque a estrela nas músicas pra elas aparecerem aqui.</div></div>
+    </div>
+    <div class="card">
+      <h3>Minhas playlists</h3>
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="newPl" placeholder="Nome da playlist (ex: Set da balada)" style="flex:1">
+        <button class="primary" id="btnNewPl" style="flex:none;padding:0 18px">Criar</button>
+      </div>
+      <div id="playlists"></div>
+      <p class="hint">As playlists ficam salvas neste aparelho/navegador. A ordem é a que você montar.</p>
+    </div>
+  </section>
+
+  <!-- ============ MONITOR ============ -->
+  <section class="page" id="pg-monitor">
+    <div class="card">
+      <h3>Voltímetro</h3>
+      <div class="gauge">
+        <div class="v" id="voltVal">--<small>V</small></div>
+        <div class="bar"><i id="voltBar" style="width:0%"></i></div>
+        <div class="hint" id="voltMsg">Toque em "Ler tensão" ou ative o monitor contínuo.</div>
+      </div>
+      <div class="seg" style="margin-top:8px">
+        <button id="btnVoltOnce">Ler 1x</button>
+        <button id="btnVoltAuto">Monitorar</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Console <span class="tag">bytes crus</span></h3>
+      <div class="log" id="log"></div>
+      <div class="row" style="margin-top:10px">
+        <input type="text" id="rawCmd" placeholder="Hex cru p/ enviar: 00 ca 3d 01" style="flex:1">
+        <button id="btnRaw" style="flex:none;padding:0 16px">Enviar</button>
+      </div>
+      <p class="hint">O console mostra tudo que vai (TX) e volta (RX). É com ele que a gente termina de decodificar as pastas juntos.</p>
+    </div>
+  </section>
+
+</div>
+
+<nav>
+  <button data-tab="conn" class="sel"><span class="ni">🔗</span>Conectar</button>
+  <button data-tab="player"><span class="ni">🎛️</span>Player</button>
+  <button data-tab="browse"><span class="ni">📂</span>Músicas</button>
+  <button data-tab="playlists"><span class="ni">⭐</span>Listas</button>
+  <button data-tab="monitor"><span class="ni">📊</span>Monitor</button>
+</nav>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ===================================================================
+   STX Control · protocolo Stetsom STX DSP (eng. reversa do app oficial)
+   Serviço BLE 00000427 · características 00000428 / 00000429
+   Pacote: 27 bytes  [0]=operação  [1]=comando  [2]=tamanho  [3..]=dados
+   =================================================================== */
+const SVC = '00000427-0000-1000-8000-00805f9b34fb';
+const CH_A = '00000428-0000-1000-8000-00805f9b34fb';
+const CH_B = '00000429-0000-1000-8000-00805f9b34fb';
+const OAD = 'f000ffc0-0451-4000-b000-000000000000';
+
+// comandos (código já convertido p/ sem sinal) -> [codigo, tamanho]
+const CMD = {
+  PLAYER:[202,61], VERSION:[201,17], VOLTMETER:[212,6], NAME:[128,15],
+  LEVEL:[110,20], CROSSOVER:[93,8], LIMITER:[101,16], DIMMER:[211,2]
+};
+// operação no byte[0]
+const OP = { READ:3, WRITE:0, LIST:1 };
+// sub-funções do PLAYER (byte[3])
+const P = { SOURCE:0, PLAYPAUSE:1, PREV:2, NEXT:3, PREVFOLDER:4, NEXTFOLDER:5,
+            SELECT_ID:8, MODE:12, LIST:53, HALFSEEK:48 };
+
+let dev=null, gatt=null, chWrite=null, chNotify=null, writeNoResp=false;
+let connected=false;
+
+/* ---------- util ---------- */
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+const hex=b=>[...b].map(x=>x.toString(16).padStart(2,'0')).join(' ');
+function toast(m,k){const t=$('#toast');t.textContent=m;t.className='toast show '+(k||'');
+  clearTimeout(t._t);t._t=setTimeout(()=>t.className='toast',1900);}
+function logLine(cls,label,msg){const l=$('#log');const d=new Date().toLocaleTimeString('pt-BR');
+  l.insertAdjacentHTML('beforeend',`<div class="${cls}"><span class="in">${d}</span> <b>${label}</b> ${msg}</div>`);
+  l.scrollTop=l.scrollHeight;}
+
+/* ---------- pacote ---------- */
+function pkt(cmdName, op){
+  const [code,size]=CMD[cmdName]; const b=new Uint8Array(27);
+  b[0]=op; b[1]=code&0xff; b[2]=size; return b;
+}
+
+/* ---------- BLE ---------- */
+async function connect(){
+  if(!navigator.bluetooth){toast('Este navegador não tem Bluetooth. Use o Chrome no Android.','bad');return;}
+  try{
+    setState('mid','Procurando aparelho...');
+    dev=await navigator.bluetooth.requestDevice({
+      acceptAllDevices:true, optionalServices:[SVC,OAD]
+    });
+    dev.addEventListener('gattserverdisconnected',onDrop);
+    setState('mid','Conectando...');
+    gatt=await dev.gatt.connect();
+    const svc=await gatt.getPrimaryService(SVC);
+    const chars=await svc.getCharacteristics();
+    for(const c of chars){
+      const p=c.properties;
+      if((p.write||p.writeWithoutResponse)&&!chWrite){chWrite=c;writeNoResp=p.writeWithoutResponse&&!p.write;}
+      if(p.notify||p.indicate){chNotify=c;}
+    }
+    if(!chWrite){throw new Error('Canal de escrita não encontrado neste aparelho.');}
+    if(chNotify){await chNotify.startNotifications();
+      chNotify.addEventListener('characteristicvaluechanged',onNotify);}
+    connected=true; setState('on','Conectado a '+(dev.name||'processador'));
+    $('#btnDisconnect').disabled=false; $('#devCard').style.display='block';
+    $('#devInfo').innerHTML=`<div class="item"><div class="ic">📡</div><div class="mt"><b>${dev.name||'Processador STX'}</b><small>Conectado · escrita ${writeNoResp?'sem':'com'} resposta</small></div></div>`;
+    logLine('rx','CONECTADO',(dev.name||'')+' · write='+chWrite.uuid.slice(0,8)+(chNotify?' notify='+chNotify.uuid.slice(0,8):' (sem notify)'));
+    toast('Conectado! ✅','ok');
+    setTimeout(()=>{readVersion();},400);
+  }catch(e){
+    logLine('er','ERRO',e.message);
+    setState('off','Falha: '+e.message);
+    if(e.name!=='NotFoundError') toast('Falha ao conectar: '+e.message,'bad');
+    else setState('off','Desconectado.');
+  }
+}
+function onDrop(){connected=false;chWrite=chNotify=gatt=null;
+  setState('off','Conexão perdida. Toque em Conectar.');$('#btnDisconnect').disabled=true;
+  logLine('er','DESCONECTADO','conexão perdida');toast('Conexão perdida','bad');}
+function disconnect(){if(dev&&dev.gatt.connected)dev.gatt.disconnect();onDrop();}
+
+async function send(b, tag){
+  if(!connected||!chWrite){toast('Conecte primeiro.','bad');return;}
+  try{
+    if(writeNoResp)await chWrite.writeValueWithoutResponse(b);
+    else await chWrite.writeValue(b);
+    logLine('tx','TX'+(tag?'·'+tag:''),hex(b));
+  }catch(e){logLine('er','ERRO TX',e.message);toast('Erro ao enviar','bad');}
+}
+let lastRx=null;
+function onNotify(ev){
+  const b=new Uint8Array(ev.target.value.buffer);
+  lastRx=b;
+  logLine('rx','RX',hex(b));
+  parseRx(b);
+}
+function setState(k,msg){const d=$('#statusDot');d.className='dot'+(k==='on'?' on':k==='mid'?' mid':'');
+  if(msg){$('#connState').textContent=msg;}d.title=msg||'';}
+
+/* ---------- parse de respostas ---------- */
+function parseRx(b){
+  const cmd=b[1];
+  // VOLTÍMETRO (212) -> tensão nos bytes de dados (tentativa: b[3],b[4] -> volts*10)
+  if(cmd===CMD.VOLTMETER[0]){
+    let raw = b[4]!==undefined ? (b[3] | (b[4]<<8)) : b[3];
+    let v = raw/10; if(v>40||v<0){ v=b[3]/10; }
+    showVolt(v);
+  }
+  // LISTA DE MÚSICA/PASTA (PLAYER + nome em ASCII)
+  if(cmd===CMD.PLAYER[0]){
+    const name=extractAscii(b);
+    if(name&&name.length>1){ onListEntry(b,name); }
+  }
+  // VERSÃO
+  if(cmd===CMD.VERSION[0]){
+    const s=extractAscii(b);
+    if(s) $('#devInfo').insertAdjacentHTML('beforeend',
+      `<div class="item"><div class="ic">🏷️</div><div class="mt"><b>Versão</b><small>${s}</small></div></div>`);
+  }
+}
+function extractAscii(b){
+  let s='';for(let i=3;i<b.length;i++){const c=b[i];if(c>=32&&c<127)s+=String.fromCharCode(c);else if(s.length)break;}
+  return s.trim();
+}
+
+/* ---------- PLAYER ---------- */
+function playerCmd(sub, d4, d5, op){
+  const b=pkt('PLAYER', op!==undefined?op:OP.WRITE); b[3]=sub;
+  if(d4!==undefined)b[4]=d4&0xff; if(d5!==undefined)b[5]=d5&0xff; return b;
+}
+const actions={
+  playPause:()=>{send(playerCmd(P.PLAYPAUSE),'play/pause');togglePlayUI();},
+  next:()=>send(playerCmd(P.NEXT),'próxima'),
+  prev:()=>send(playerCmd(P.PREV),'anterior'),
+  nextFolder:()=>send(playerCmd(P.NEXTFOLDER),'pasta+'),
+  prevFolder:()=>send(playerCmd(P.PREVFOLDER),'pasta-')
+};
+let isPlaying=false;
+function togglePlayUI(){isPlaying=!isPlaying;$('#nowPlaying').classList.toggle('play',isPlaying);}
+function selectSong(id,name){
+  send(playerCmd(P.SELECT_ID, id&255, id>>8),'tocar#'+id);
+  $('#npTitle').textContent=name||('Música #'+id);$('#npSub').textContent='tocando agora';
+  isPlaying=true;$('#nowPlaying').classList.add('play');
+  renderBrowse();
+}
+
+/* fontes (ordem a confirmar no aparelho) */
+const SOURCES=[['USB / Pen drive','💿',0],['Bluetooth','🔵',1],['Rádio FM','📻',2],['RCA / Fio','🔌',3]];
+function buildSources(){$('#sources').innerHTML=SOURCES.map(s=>
+  `<button data-src="${s[2]}">${s[1]}<br><small style="font-size:10px;color:var(--mut)">${s[0]}</small></button>`).join('');
+  $$('#sources button').forEach(btn=>btn.onclick=()=>{
+    send(playerCmd(P.SOURCE, +btn.dataset.src),'fonte');
+    $$('#sources button').forEach(b=>b.classList.remove('sel'));btn.classList.add('sel');
+    toast('Fonte: '+btn.querySelector('small').textContent);});}
+
+/* ---------- LISTA DE PASTAS/MÚSICAS ---------- */
+let library=[];        // {id,name,folder,isFolder}
+let curFolder='root';
+let loadingList=false, listIndex=0;
+function loadList(){
+  if(!connected){toast('Conecte primeiro.','bad');return;}
+  library=[]; listIndex=0; loadingList=true;
+  $('#browseList').innerHTML='<div class="empty">Carregando do pen drive...</div>';
+  toast('Pedindo lista ao processador...');
+  requestEntry(0);
+  // timeout de segurança: se não vier resposta, avisa
+  clearTimeout(loadList._t);
+  loadList._t=setTimeout(()=>{if(library.length===0){
+    $('#browseList').innerHTML='<div class="empty">Sem resposta do pen drive ainda.<br>Confira no Console (Monitor) o que voltou — ajustamos a leitura juntos.</div>';
+    loadingList=false;}},4000);
+}
+function requestEntry(i){
+  const b=pkt('PLAYER',OP.LIST); b[3]=P.LIST; b[4]=i&255; b[5]=i>>8; send(b,'lista#'+i);
+}
+function onListEntry(b,name){
+  if(!loadingList) return;
+  const id = b[4]|(b[5]<<8);
+  const isFolder = (b[6]===1)||/^[^.]*$/.test(name)&&name===name.toUpperCase()&&false; // heurística leve
+  library.push({id, name, folder:curFolder, isFolder:b[6]===1});
+  listIndex++;
+  renderBrowse();
+  if(listIndex<2000){ requestEntry(listIndex); } // pede o próximo
+  else loadingList=false;
+}
+function stopLoad(){loadingList=false;}
+
+/* ---------- RENDER navegação (com memória de posição!) ---------- */
+let scrollMem={}; // lembra scroll por pasta -> corrige o bug do app oficial
+function renderBrowse(){
+  const q=$('#search').value.trim().toLowerCase();
+  const list=$('#browseList');
+  let items = library;
+  if(q){ items = library.filter(x=>x.name.toLowerCase().includes(q)); }
+  else { items = library.filter(x=>x.folder===curFolder); }
+  if(items.length===0){
+    list.innerHTML = library.length===0
+      ? '<div class="empty">Nenhuma música carregada ainda.</div>'
+      : '<div class="empty">Nada encontrado.</div>';
+    return;
+  }
+  list.innerHTML = items.map(x=>{
+    const fav=isFav(x.id)?'on':'';
+    return `<div class="item ${x.isFolder?'folder':''}" data-id="${x.id}" data-folder="${x.isFolder?x.id:''}">
+      <div class="ic">${x.isFolder?'📁':'🎵'}</div>
+      <div class="mt"><b>${esc(x.name)}</b><small>${x.isFolder?'pasta':'#'+x.id}</small></div>
+      ${x.isFolder?'':`<div class="star ${fav}" data-fav="${x.id}">★</div>`}
+    </div>`;}).join('');
+  // restaura scroll da pasta (correção do "volta pro início")
+  requestAnimationFrame(()=>{ list.scrollTop = scrollMem[curFolder]||0; });
+  list.querySelectorAll('.item').forEach(el=>{
+    el.querySelector('.mt').onclick=()=>{
+      const fid=el.dataset.folder;
+      if(fid){ scrollMem[curFolder]=list.scrollTop; curFolder=fid; $('#search').value=''; renderCrumbs(); renderBrowse(); }
+      else { selectSong(+el.dataset.id, el.querySelector('b').textContent); }
+    };
+    const star=el.querySelector('.star');
+    if(star)star.onclick=e=>{e.stopPropagation();toggleFav(+star.dataset.fav);renderBrowse();renderFavs();};
+  });
+}
+function renderCrumbs(){
+  const c=$('#crumbs');
+  if(curFolder==='root'){c.innerHTML='<span data-path="root">🏠 Início</span>';}
+  else{const f=library.find(x=>x.id==curFolder);
+    c.innerHTML='<span data-path="root">🏠 Início</span> <i>›</i> <span>'+esc(f?f.name:'Pasta')+'</span>';}
+  c.querySelector('[data-path="root"]').onclick=()=>{curFolder='root';renderCrumbs();renderBrowse();};
+}
+const esc=s=>(s||'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+
+/* ---------- FAVORITAS + PLAYLISTS (salvas no navegador) ---------- */
+const DB={
+  favs(){return JSON.parse(localStorage.getItem('stx_favs')||'[]');},
+  setFavs(a){localStorage.setItem('stx_favs',JSON.stringify(a));},
+  pls(){return JSON.parse(localStorage.getItem('stx_pls')||'[]');},
+  setPls(a){localStorage.setItem('stx_pls',JSON.stringify(a));}
+};
+const isFav=id=>DB.favs().some(f=>f.id===id);
+function toggleFav(id){let f=DB.favs();const x=library.find(l=>l.id===id);
+  if(isFav(id))f=f.filter(y=>y.id!==id);else f.push({id,name:x?x.name:'#'+id});DB.setFavs(f);}
+function renderFavs(){const f=DB.favs();const el=$('#favList');
+  if(!f.length){el.innerHTML='<div class="empty">Marque a estrela nas músicas.</div>';return;}
+  el.innerHTML=f.map(x=>`<div class="item" data-id="${x.id}"><div class="ic">🎵</div>
+    <div class="mt"><b>${esc(x.name)}</b><small>#${x.id}</small></div>
+    <div class="star on" data-rm="${x.id}">★</div></div>`).join('');
+  el.querySelectorAll('.item').forEach(el2=>{
+    el2.querySelector('.mt').onclick=()=>selectSong(+el2.dataset.id,el2.querySelector('b').textContent);
+    el2.querySelector('.star').onclick=e=>{e.stopPropagation();toggleFav(+el2.querySelector('.star').dataset.rm);renderFavs();renderBrowse();};});}
+
+function renderPlaylists(){const pls=DB.pls();const wrap=$('#playlists');
+  if(!pls.length){wrap.innerHTML='<div class="empty">Nenhuma playlist ainda.</div>';return;}
+  wrap.innerHTML=pls.map((p,i)=>`<div class="card2" style="background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <b style="flex:1">${esc(p.name)}</b>
+      <span class="tag">${p.songs.length} músicas</span>
+      <button class="ghost" style="min-height:0;padding:6px 10px" data-play="${i}">▶ Tocar</button>
+      <button class="ghost" style="min-height:0;padding:6px 10px;color:var(--bad)" data-del="${i}">🗑</button>
+    </div>
+    <div class="list" style="max-height:160px">${p.songs.map(s=>`<div class="item"><div class="ic">🎵</div><div class="mt"><b>${esc(s.name)}</b><small>#${s.id}</small></div><div class="star" data-plrm="${i}:${s.id}">✕</div></div>`).join('')||'<div class="empty">Vazia. Adicione músicas pela aba Músicas (segure uma música).</div>'}</div>
+  </div>`).join('');
+  wrap.querySelectorAll('[data-play]').forEach(b=>b.onclick=()=>playPlaylist(+b.dataset.play));
+  wrap.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{let a=DB.pls();a.splice(+b.dataset.del,1);DB.setPls(a);renderPlaylists();});
+  wrap.querySelectorAll('[data-plrm]').forEach(b=>b.onclick=()=>{const[i,id]=b.dataset.plrm.split(':');let a=DB.pls();a[i].songs=a[i].songs.filter(s=>s.id!=id);DB.setPls(a);renderPlaylists();});}
+let plTimer=null;
+function playPlaylist(i){const p=DB.pls()[i];if(!p||!p.songs.length)return;
+  if(!connected){toast('Conecte primeiro.','bad');return;}
+  toast('Tocando playlist: '+p.name,'ok');let n=0;clearInterval(plTimer);
+  const first=p.songs[0];selectSong(first.id,first.name);
+  // observação: encadear as próximas depende de o aparelho avisar "acabou a faixa";
+  // por ora toca a 1ª e deixa o modo "repetir tudo" seguir — ajustamos com teste real.
+}
+
+/* ---------- VOLTÍMETRO ---------- */
+let voltTimer=null;
+function readVolt(){send(pkt('VOLTMETER',OP.READ),'tensão');}
+function showVolt(v){
+  $('#voltVal').innerHTML=v.toFixed(1)+'<small>V</small>';
+  const pct=Math.max(0,Math.min(100,((v-10)/(15-10))*100));
+  $('#voltBar').style.width=pct+'%';
+  if(v<10.5){$('#voltMsg').innerHTML='<span style="color:var(--bad)">⚠️ Bateria baixa (abaixo de 10,5V)</span>';}
+  else if(v<12){$('#voltMsg').textContent='Tensão um pouco baixa.';}
+  else{$('#voltMsg').textContent='Tensão normal.';}
+}
+function readVersion(){send(pkt('VERSION',OP.READ),'versão');}
+
+/* ---------- RAW ---------- */
+function sendRaw(){const t=$('#rawCmd').value.trim();if(!t)return;
+  const parts=t.split(/[\s,]+/).map(x=>parseInt(x,16));
+  if(parts.some(isNaN)){toast('Hex inválido','bad');return;}
+  const b=new Uint8Array(27);parts.forEach((v,i)=>{if(i<27)b[i]=v;});send(b,'raw');}
+
+/* ---------- navegação de abas ---------- */
+function tab(name){$$('.page').forEach(p=>p.classList.remove('show'));
+  $('#pg-'+name).classList.add('show');
+  $$('nav button').forEach(b=>b.classList.toggle('sel',b.dataset.tab===name));window.scrollTo(0,0);}
+
+/* ---------- wiring ---------- */
+$('#btnConnect').onclick=connect;
+$('#btnDisconnect').onclick=disconnect;
+$('#btnReadVersion').onclick=readVersion;
+$('#btnReadVolt').onclick=readVolt;
+$('#btnVoltOnce').onclick=readVolt;
+$('#btnVoltAuto').onclick=function(){if(voltTimer){clearInterval(voltTimer);voltTimer=null;this.textContent='Monitorar';this.classList.remove('sel');}
+  else{voltTimer=setInterval(readVolt,2000);readVolt();this.textContent='Parar';this.classList.add('sel');}};
+$('#btnRaw').onclick=sendRaw;
+$('#btnJump').onclick=()=>{const id=parseInt($('#jumpId').value);if(!isNaN(id))selectSong(id);};
+$('#btnLoadList').onclick=loadList;
+$('#search').oninput=renderBrowse;
+$$('[data-act]').forEach(b=>b.onclick=()=>actions[b.dataset.act]&&actions[b.dataset.act]());
+$$('#playMode button').forEach(b=>b.onclick=()=>{$$('#playMode button').forEach(x=>x.classList.remove('sel'));
+  b.classList.add('sel');send(playerCmd(P.MODE,+b.dataset.mode),'modo');});
+$('#btnNewPl').onclick=()=>{const n=$('#newPl').value.trim();if(!n)return;
+  let a=DB.pls();a.push({name:n,songs:[]});DB.setPls(a);$('#newPl').value='';renderPlaylists();toast('Playlist criada');};
+$$('nav button').forEach(b=>b.onclick=()=>tab(b.dataset.tab));
+
+buildSources();renderFavs();renderPlaylists();renderCrumbs();
+logLine('in','PRONTO','STX Control carregado. Conecte o processador para começar.');
+</script>
+</body>
+</html>
