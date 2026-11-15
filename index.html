@@ -518,6 +518,7 @@ body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-i
     </div>
     <div class="clock" aria-live="off"><div class="t num" data-clock>--:--</div><div class="d" data-date></div></div>
     <div class="top-right">
+      <span class="pill hidden" id="volt" title="Tensão no processador"><i></i>--</span>
       <button class="pill btn" id="conn" type="button"><i></i>Conectando…</button>
       <button class="pill btn" id="licpill" type="button"><i></i>Licença</button>
     </div>
@@ -877,6 +878,8 @@ const P = {
   RADIO_IDX: 10, RADIO_FREQ: 11, MODE: 12, SEEK: 48, VOLUME_SET: 52,
   Q_SOURCE: 19, Q_STATUS: 20, Q_CUR_FOLDER: 21, Q_STATE: 24, Q_TIME: 29, Q_FILENAME: 36, Q_SONG_FOLDER: 37,
   Q_VOLUME: 51, Q_FOLDER: 53, Q_FOLDER_NAME: 15,
+  // avisos que o processador manda sozinho (confirmado na gravação do app oficial)
+  EV_NAME: 14, EV_FOLDER: 15, EV_TRACK: 21, EV_TIME: 22, VOLT: 0xCB, PASS: 0x7E,
   SOURCES: ['USB', 'Rádio', 'Bluetooth', 'RCA', 'Desligado'],
   MODES: ['Sequencial', 'Repetir uma', 'Repetir pasta', 'Aleatório'],
   STATES: ['Pausado', 'Tocando', 'Buscando', 'Buscando', 'Alerta'],
@@ -918,8 +921,16 @@ class StxProtocol {
     }
     this.busy = false;
   }
-  cmd(sub, data = [], priority = true) {
-    return this._enqueue(async () => { const ok = await this._w(this.packet(0, sub, data)); await sleep(25); return ok; }, priority);
+  cmd(sub, data = [], priority = true, type = 0) {
+    return this._enqueue(async () => { const ok = await this._w(this.packet(type, sub, data)); await sleep(25); return ok; }, priority);
+  }
+  // envia um pacote pronto e espera a resposta que combinar (senha, etc.)
+  sendWait(pkt, match, timeout = 1500) {
+    return this._enqueue(async () => {
+      const p = new Promise(res => { const w = { cmd: pkt[1], match, res, timer: setTimeout(() => { this.waiters = this.waiters.filter(x => x !== w); res(null); }, timeout) }; this.waiters.push(w); });
+      if (!(await this._w(pkt))) return null;
+      return p;
+    }, true);
   }
   request(sub, data = [], { timeout = 900, tries = 3, priority = false, match } = {}) {
     return this._enqueue(async () => {
@@ -939,7 +950,7 @@ class StxProtocol {
   // ---- regulagens (DSP): mesmo pacote, outro número de comando no byte 1 ----
   dspWrite(cmd, len, b3, fill) {
     return this._enqueue(async () => {
-      const b = new Uint8Array(P.SIZE); b[0] = 0; b[1] = cmd; b[2] = len; b[3] = b3 & 255; fill && fill(b);
+      const b = new Uint8Array(P.SIZE); b[0] = 1; b[1] = cmd; b[2] = len; b[3] = b3 & 255; fill && fill(b);
       const ok = await this._w(b); await sleep(18); return ok;
     }, true);
   }
@@ -947,7 +958,7 @@ class StxProtocol {
     return this._enqueue(async () => {
       for (let a = 0; a < tries; a++) {
         const p = new Promise(res => {
-          const w = { cmd, res, timer: setTimeout(() => { this.waiters = this.waiters.filter(x => x !== w); res(null); }, timeout) };
+          const w = { cmd, match: r => r[0] === 4, res, timer: setTimeout(() => { this.waiters = this.waiters.filter(x => x !== w); res(null); }, timeout) };
           this.waiters.push(w);
         });
         const b = new Uint8Array(P.SIZE); b[0] = 3; b[1] = cmd; b[2] = len; b[3] = b3 & 255;
@@ -960,7 +971,7 @@ class StxProtocol {
   // ---- leituras com significado ----
   async status() {
     const r = await this.request(P.Q_STATUS, [], { priority: true }); if (!r) return null;
-    return { mode: r[5], connected: !!r[6], songs: u16(r, 7), folders: u16(r, 9) };
+    return { mode: r[5], connected: !!r[6], songs: u16(r, 7), folders: u16(r, 9) + 1 }; // +1 = pasta raiz (número 0)
   }
   async folder(id, priority = false) {
     const r = await this.request(P.Q_FOLDER, [id & 255, id >> 8], { priority, match: b => u16(b, 4) === id }); if (!r) return null;
@@ -979,7 +990,7 @@ class StxProtocol {
 
 /* ---------------- simulador (modo demonstração) ----------------
    Responde exatamente no formato do protocolo, para o app funcionar igual quando o Bluetooth for ligado. */
-const DEMO_LIB = [
+const DEMO_LIB = [['', 0],
   ['FORRÓ', 0], ['Trio Mandacaru', 14], ['Banda Brisa do Sertão', 16], ['Forró Pé de Serra 2026', 12], ['Os Cabras do Agreste', 10],
   ['PAGODE', 0], ['Grupo Roda Leve', 13], ['Pagode do Quintal', 11], ['Samba de Raiz Vol 3', 9],
   ['PISEIRO - Zé do Paredão', 15], ['PISEIRO - Vaqueiro Elétrico', 12],
@@ -1009,12 +1020,20 @@ class SimTransport {
     this.s = { source: 0, playing: false, idx: 0, pos: 0, mode: 0, vol: 22 };
     setInterval(() => this._tick(), 1000);
   }
+  _ev(sub, fill) { this._reply(sub, b => { b[0] = 5; fill(b); }); }
+  _announce() {
+    const s = this.s, t = this._cur(), f = this.folders[t.folder];
+    this._ev(P.EV_TRACK, b => { b[4] = s.idx & 255; b[5] = s.idx >> 8; b[6] = f.id & 255; b[7] = f.id >> 8; });
+    this._ev(P.EV_NAME, b => { b[4] = s.idx & 255; b[5] = s.idx >> 8; this._str(b, 6, t.name); });
+    this._ev(P.EV_FOLDER, b => { b[4] = s.idx & 255; b[5] = s.idx >> 8; this._str(b, 6, f.name); });
+  }
   async connect() { return true; }
   _cur() { return this.songs[this.s.idx]; }
   _tick() {
-    if (!this.s.playing || this.s.source !== 0) return;
-    this.s.pos++;
-    if (this.s.pos >= this._cur().dur) this._auto();
+    if (this.s.playing && this.s.source === 0) { this.s.pos++; if (this.s.pos >= this._cur().dur) { this._auto(); this._announce(); } }
+    const s = this.s, c = this._cur();
+    this._ev(P.EV_TIME, b => { b[4] = s.idx & 255; b[5] = s.idx >> 8; b[6] = s.pos & 255; b[7] = s.pos >> 8; b[10] = c.dur & 255; b[11] = c.dur >> 8; });
+    if (Math.random() < .3) this._ev(P.VOLT, b => { const v = 1250 + ((Math.random() * 30) | 0); b[1] = P.VOLT; b[2] = 5; b[3] = v & 255; b[4] = v >> 8; });
   }
   _auto() {
     const s = this.s, f = this.folders[this._cur().folder];
@@ -1037,16 +1056,19 @@ class SimTransport {
   _str(b, at, s) { for (let i = 0; i < s.length && at + i < b.length - 1; i++) { const c = s.charCodeAt(i); b[at + i] = c < 256 ? c : 63; } }
   async write(pkt) {
     await sleep(6);
+    if (pkt[1] === P.PASS) { const b = new Uint8Array(64); b.set(pkt); b[0] = 2; b[3] = (!this.pwd || String.fromCharCode(...pkt.slice(4, 8)) === this.pwd) ? 1 : 2; setTimeout(() => this.onData && this.onData(b), 20); return; }
     if (pkt[1] !== P.CMD) { // regulagens
       this.dsp = this.dsp || new Map();
-      if (pkt[0] === 0) { this.dsp.set(pkt[1], new Uint8Array(pkt)); this.lastDsp = pkt[1]; return; }
+      if (pkt[0] === 0 || pkt[0] === 1) { this.dsp.set(pkt[1], new Uint8Array(pkt)); this.lastDsp = pkt[1]; if (pkt[0] === 1) { const a = new Uint8Array(pkt); a[0] = 2; setTimeout(() => this.onData && this.onData(a), 10); } return; }
       const saved = this.dsp.get(pkt[1]);
-      if (saved) { const b = new Uint8Array(saved); b[0] = 3; setTimeout(() => this.onData && this.onData(b), 12 + Math.random() * 25); }
+      if (saved) { const b = new Uint8Array(saved); b[0] = 4; setTimeout(() => this.onData && this.onData(b), 12 + Math.random() * 25); }
       return;
     }
     const type = pkt[0], sub = pkt[3], s = this.s, d = pkt.slice(4);
     const id = d[0] | (d[1] << 8);
-    if (type === 0) {
+    if (type === 0 || (type === 1 && sub === P.PLAY_ID)) {
+      const before = s.idx;
+      setTimeout(() => { if (s.idx !== before || sub === P.PLAY_ID) this._announce(); }, 30);
       switch (sub) {
         case P.SOURCE: s.source = d[0]; break;
         case P.PLAYPAUSE: s.playing = !s.playing; break;
@@ -1064,7 +1086,7 @@ class SimTransport {
       return;
     }
     switch (sub) {
-      case P.Q_STATUS: return this._reply(sub, b => { b[5] = s.mode; b[6] = 1; b[7] = this.songs.length & 255; b[8] = this.songs.length >> 8; b[9] = this.folders.length & 255; b[10] = this.folders.length >> 8; });
+      case P.Q_STATUS: return this._reply(sub, b => { b[0] = 5; b[5] = s.mode; b[6] = 1; b[7] = this.songs.length & 255; b[8] = this.songs.length >> 8; b[9] = (this.folders.length - 1) & 255; b[10] = (this.folders.length - 1) >> 8; });
       case P.Q_FOLDER: { const f = this.folders[id]; if (!f) return; return this._reply(sub, b => { b[4] = id & 255; b[5] = id >> 8; b[6] = f.first & 255; b[7] = f.first >> 8; b[8] = f.count & 255; b[9] = f.count >> 8; this._str(b, 10, f.name); }); }
       case P.Q_FILENAME: { const t = this.songs[id]; if (!t) return; return this._reply(sub, b => { b[4] = id & 255; b[5] = id >> 8; this._str(b, 6, t.name); }); }
       case P.Q_SONG_FOLDER: { const t = this.songs[id]; if (!t) return; return this._reply(sub, b => { b[4] = id & 255; b[5] = id >> 8; this._str(b, 6, this.folders[t.folder].name); }); }
@@ -1224,7 +1246,7 @@ function defaultOut(i) {
 }
 function defaultState() {
   return {
-    model: 'STX2496BT', masterOn: true, main: 30,
+    model: 'STX2496BT', masterOn: true, main: 100,
     outs: Array.from({ length: D.OUTS }, (_, i) => defaultOut(i)),
     geq: { preset: 12, g: D.GEQ_F.map(() => 0) },
     inPeq: [63, 160, 400, 1000, 2500, 6300, 12000].map(f => ({ type: 0, f, g: 0, q: 1.4, on: true })),
@@ -1236,25 +1258,37 @@ function defaultState() {
   };
 }
 
+/* ---------- byte 3 = qual campo mudou (STX2496BT, família wl1) ----------
+   confirmados: nível (saída N = N*2+4, geral 2, master 1), crossover (1,2,4,5,7), paramétrico (1,3,4,5,6),
+   gráfico (preset 1, banda i = i+2), limitador (bits 1, limiares/tempos 2..14), realce (1,2,4), ruído (1,2), subgrave (1,2,3) */
+const CODES = {
+  level: [1, 2, ...Array.from({ length: 8 }, (_, i) => i * 2 + 4), ...Array.from({ length: 8 }, (_, i) => i * 2 + 5)],
+  xo: [1, 2, 4, 5, 7], peq: [1, 3, 4, 5, 6], geq: [1, ...D.GEQ_F.map((_, i) => i + 2)],
+  lim: [1, 2, 4, 6, 8, 10, 12, 14], delay: Array.from({ length: 8 }, (_, i) => i + 1), phase: Array.from({ length: 8 }, (_, i) => i + 1),
+  router: Array.from({ length: 8 }, (_, i) => i + 1), inLevel: [2, 4, 6, 8, 12, 13, 14, 15, 16], freq: [1, 2, 4], noise: [1, 2], sub: [1, 2, 3], seq: [0], dimmer: [0],
+};
+const PEQ_CODE = { f: 1, g: 3, q: 4, type: 5, on: 6 }, XO_CODE = { preset: 1, hpF: 2, hpT: 4, lpF: 5, lpT: 7 };
+const LIM_CODE = { bits: 1, rmsThr: 2, att: 4, rmsHold: 6, rmsRel: 8, peakThr: 10, peakHold: 12, peakRel: 14 };
+
 /* ---------- codificação de cada comando ---------- */
 const Enc = {
-  level: (s, idx = 0) => [D.LEVEL, D.LEN.LEVEL, idx, b => { b[4] = s.masterOn ? 1 : 0; b[5] = s.main; let m = 0; s.outs.forEach((o, i) => { if (o.on) m |= 1 << i; }); b[6] = m; s.outs.forEach((o, i) => i16(b, 7 + i * 2, o.level * 10)); }],
-  xo: (s, ch) => [D.XO + ch, D.LEN.XO, ch, b => { const x = s.outs[ch].xo; b[4] = x.preset; i16(b, 5, x.hpF); b[7] = x.hpT; i16(b, 8, x.lpF); b[10] = x.lpT; }],
-  delay: s => [D.DELAY, D.LEN.DELAY, 0, b => { b[4] = 1; s.outs.forEach((o, i) => i16(b, 5 + i * 2, o.delay * 10)); }],
-  geq: s => [D.GEQ, D.LEN.GEQ, 0, b => { b[4] = s.geq.preset; s.geq.g.forEach((g, i) => { b[5 + i] = Math.round(g * 10) & 255; }); }],
-  peqBand: (p, cmd, idx) => [cmd, D.LEN.PEQ, 0, b => { b[3] = ((p.type ? 1 : 0) << 4) | ((p.type === 2 ? 1 : 0) << 5) | ((p.on ? 1 : 0) << 6); i16(b, 4, p.f); b[6] = Math.round(p.g * 10) & 255; b[7] = Math.round(p.q * 10) & 255; }],
-  peqOut: (s, ch, band) => Enc.peqBand(s.outs[ch].peq[band], D.PEQ_OUT + ch * D.BANDS + band),
-  peqIn: (s, band) => Enc.peqBand(s.inPeq[band], D.PEQ_IN + band),
-  lim: (s, ch) => [D.LIM + ch, D.LEN.LIM, ch, b => { const l = s.outs[ch].lim;
+  level: (s, code = 4) => [D.LEVEL, D.LEN.LEVEL, code, b => { b[4] = s.masterOn ? 1 : 0; b[5] = s.main; let m = 0; s.outs.forEach((o, i) => { if (o.on) m |= 1 << i; }); b[6] = m; s.outs.forEach((o, i) => i16(b, 7 + i * 2, o.level * 10)); }],
+  xo: (s, ch, code = 1) => [D.XO + ch, D.LEN.XO, code, b => { const x = s.outs[ch].xo; b[4] = x.preset; i16(b, 5, x.hpF); b[7] = x.hpT; i16(b, 8, x.lpF); b[10] = x.lpT; }],
+  delay: (s, code = 1) => [D.DELAY, D.LEN.DELAY, code, b => { b[4] = 1; s.outs.forEach((o, i) => i16(b, 5 + i * 2, o.delay * 10)); }],
+  geq: (s, code = 1) => [D.GEQ, D.LEN.GEQ, code, b => { b[4] = s.geq.preset; s.geq.g.forEach((g, i) => { b[5 + i] = Math.round(g * 10) & 255; }); }],
+  peqBand: (p, cmd, code = 1) => [cmd, D.LEN.PEQ, code, b => { b[3] = (code & 15) | ((p.type ? 1 : 0) << 4) | ((p.type === 2 ? 1 : 0) << 5) | ((p.on ? 1 : 0) << 6); i16(b, 4, p.f); b[6] = Math.round(p.g * 10) & 255; b[7] = Math.round(p.q * 10) & 255; }],
+  peqOut: (s, ch, band, code) => Enc.peqBand(s.outs[ch].peq[band], D.PEQ_OUT + ch * D.BANDS + band, code),
+  peqIn: (s, band, code) => Enc.peqBand(s.inPeq[band], D.PEQ_IN + band, code),
+  lim: (s, ch, code = 1) => [D.LIM + ch, D.LEN.LIM, code, b => { const l = s.outs[ch].lim;
     b[4] = (l.rmsAuto ? 1 : 0) | (l.rmsOn ? 2 : 0) | (l.peakAuto ? 4 : 0) | (l.peakOn ? 8 : 0);
     i16(b, 5, l.rmsThr * 10); i16(b, 7, l.att * 10); i16(b, 9, l.rmsHold); i16(b, 11, l.rmsRel); i16(b, 13, l.peakThr * 10); i16(b, 15, l.peakHold); i16(b, 17, l.peakRel); }],
-  router: s => [D.ROUTER, D.LEN.ROUTER, 0, b => { s.outs.forEach((o, i) => { const r = o.route; b[4 + i] = (r.mpL ? 1 : 0) | (r.mpR ? 2 : 0) | (r.inA ? 4 : 0) | (r.inB ? 8 : 0) | (r.inC ? 16 : 0) | (r.inD ? 32 : 0) | (r.type ? 64 : 0); }); }],
-  phase: s => [D.PHASE, D.LEN.PHASE, 0, b => { let m = 0; s.outs.forEach((o, i) => { if (o.phase) m |= 1 << i; }); b[4] = m; }],
-  inLevel: (s, field = 2) => [D.INLEVEL, D.LEN.INLEVEL, field, b => { let m = 0; s.inLevel.on.forEach((v, i) => { if (v) m |= 1 << i; }); b[4] = m; for (let i = 0; i < 4; i++) i16(b, 5 + i * 2, s.inLevel.lv[i] * 10); i16(b, 13, s.inLevel.lv[4]); }],
-  freq: s => [D.FREQ, D.LEN.FREQ, 0, b => { b[4] = s.freq.on ? 1 : 0; i16(b, 5, s.freq.g * 10); i16(b, 7, s.freq.f); }],
-  noise: s => [D.NOISE, D.LEN.NOISE, 0, b => { b[4] = s.noise.on ? 1 : 0; i16(b, 5, s.noise.g * 10); }],
-  sub: (s, ch, field = 1) => [D.SUB + ch, D.LEN.SUB, field, b => { const x = s.outs[ch].sub; b[4] = x.on ? 1 : 0; b[5] = x.freq; b[6] = Math.round(x.gain * 10); }],
-  seq: s => [D.SEQ, D.LEN.SEQ, 0, b => { b[4] = s.seq.outs.reduce((m, v, i) => m | (v ? 1 << i : 0), 0); b[5] = Math.round(s.seq.on * 2); b[6] = Math.round(s.seq.off * 2); }],
+  router: (s, code = 1) => [D.ROUTER, D.LEN.ROUTER, code, b => { s.outs.forEach((o, i) => { const r = o.route; b[4 + i] = (r.mpL ? 1 : 0) | (r.mpR ? 2 : 0) | (r.inA ? 4 : 0) | (r.inB ? 8 : 0) | (r.inC ? 16 : 0) | (r.inD ? 32 : 0) | (r.type ? 64 : 0); }); }],
+  phase: (s, code = 1) => [D.PHASE, D.LEN.PHASE, code, b => { let m = 0; s.outs.forEach((o, i) => { if (o.phase) m |= 1 << i; }); b[4] = m; }],
+  inLevel: (s, code = 2) => [D.INLEVEL, D.LEN.INLEVEL, code, b => { let m = 0; s.inLevel.on.forEach((v, i) => { if (v) m |= 1 << i; }); b[4] = m; for (let i = 0; i < 4; i++) i16(b, 5 + i * 2, s.inLevel.lv[i] * 10); i16(b, 13, s.inLevel.lv[4]); }],
+  freq: (s, code = 1) => [D.FREQ, D.LEN.FREQ, code, b => { b[4] = s.freq.on ? 1 : 0; i16(b, 5, s.freq.g * 10); i16(b, 7, s.freq.f); }],
+  noise: (s, code = 1) => [D.NOISE, D.LEN.NOISE, code, b => { b[4] = s.noise.on ? 1 : 0; i16(b, 5, s.noise.g * 10); }],
+  sub: (s, ch, code = 1) => [D.SUB + ch, D.LEN.SUB, code, b => { const x = s.outs[ch].sub; b[4] = x.on ? 1 : 0; b[5] = x.freq; b[6] = Math.round(x.gain * 10); }],
+  seq: (s, code = 0) => [D.SEQ, D.LEN.SEQ, code, b => { b[4] = s.seq.outs.reduce((m, v, i) => m | (v ? 1 << i : 0), 0); b[5] = Math.round(s.seq.on * 2); b[6] = Math.round(s.seq.off * 2); }],
   dimmer: s => [D.DIMMER, D.LEN.DIMMER, s.dimmer.v, b => { b[3] = s.dimmer.v; b[4] = s.dimmer.on ? 1 : 0; }],
 };
 /* ---------- leitura (mesmo formato, ao contrário) ---------- */
@@ -1278,7 +1312,7 @@ const Dec = {
    Estado, envio com espera curta (não engasga o Bluetooth), presets
    ========================================================================= */
 const Dsp = {
-  s: null, proto: null, _timers: new Map(), sending: 0, listeners: new Set(), readProgress: null,
+  s: null, proto: null, _timers: new Map(), sending: 0, listeners: new Set(), readProgress: null, raw: {},
   init(proto) {
     this.proto = proto;
     const saved = Store.get('dsp', null);
@@ -1288,46 +1322,59 @@ const Dsp = {
   emit(w) { this.listeners.forEach(fn => { try { fn(w); } catch (e) { console.error(e); } }); },
   save() { clearTimeout(this._sv); this._sv = setTimeout(() => Store.set('dsp', this.s), 250); },
   // agenda o envio de um comando; mudanças rápidas (arrastar o fader) viram um envio só
-  push(key, encFn, wait = 70) {
+  // monta o pacote em cima dos bytes que o aparelho mandou (não apaga o que o app não conhece)
+  async write([cmd, len, b3, fill]) {
+    const base = this.raw[cmd];
+    return this.proto.dspWrite(cmd, len, b3, b => { if (base) for (let i = 4; i < Math.min(base.length, b.length); i++) b[i] = base[i]; fill(b); this.raw[cmd] = new Uint8Array(b); });
+  },
+  // agenda o envio; mudanças rápidas (arrastar o fader) viram um envio só. codes = quais campos mudaram
+  push(key, encFn, codes, wait = 70) {
     this.save();
     clearTimeout(this._timers.get(key));
     this._timers.set(key, setTimeout(async () => {
       this._timers.delete(key);
-      const [cmd, len, b3, fill] = encFn();
       this.sending++; this.emit('send');
-      try { await this.proto.dspWrite(cmd, len, b3, fill); } finally { this.sending--; this.emit('send'); }
+      try { for (const c of codes) await this.write(encFn(c)); } finally { this.sending--; this.emit('send'); }
     }, wait));
   },
+  // sem código = manda todos os campos daquele comando (seguro para correções automáticas)
   send: {
-    level: idx => Dsp.push('level', () => Enc.level(Dsp.s, idx)),
-    xo: ch => Dsp.push('xo' + ch, () => Enc.xo(Dsp.s, ch)),
-    delay: () => Dsp.push('delay', () => Enc.delay(Dsp.s)),
-    geq: () => Dsp.push('geq', () => Enc.geq(Dsp.s)),
-    peqOut: (ch, b) => Dsp.push(`peq${ch}.${b}`, () => Enc.peqOut(Dsp.s, ch, b)),
-    peqIn: b => Dsp.push('peqin' + b, () => Enc.peqIn(Dsp.s, b)),
-    lim: ch => Dsp.push('lim' + ch, () => Enc.lim(Dsp.s, ch)),
-    router: () => Dsp.push('router', () => Enc.router(Dsp.s)),
-    phase: () => Dsp.push('phase', () => Enc.phase(Dsp.s)),
-    inLevel: () => Dsp.push('inlevel', () => Enc.inLevel(Dsp.s)),
-    freq: () => Dsp.push('freq', () => Enc.freq(Dsp.s)),
-    noise: () => Dsp.push('noise', () => Enc.noise(Dsp.s)),
-    sub: ch => Dsp.push('sub' + ch, () => Enc.sub(Dsp.s, ch)),
-    seq: () => Dsp.push('seq', () => Enc.seq(Dsp.s)),
-    dimmer: () => Dsp.push('dimmer', () => Enc.dimmer(Dsp.s)),
+    level: code => Dsp.push('level' + code, c => Enc.level(Dsp.s, c), code == null ? CODES.level : [code]),
+    levelOut: ch => Dsp.send.level(ch * 2 + 4), levelOn: ch => Dsp.send.level(ch * 2 + 5),
+    xo: (ch, code) => Dsp.push(`xo${ch}.${code}`, c => Enc.xo(Dsp.s, ch, c), code == null ? CODES.xo : [code]),
+    delay: ch => Dsp.push('delay' + ch, c => Enc.delay(Dsp.s, c), ch == null ? CODES.delay : [ch + 1]),
+    geq: band => Dsp.push('geq' + band, c => Enc.geq(Dsp.s, c), band == null ? CODES.geq : [band + 2]),
+    peqOut: (ch, b, code) => Dsp.push(`peq${ch}.${b}.${code}`, c => Enc.peqOut(Dsp.s, ch, b, c), code == null ? CODES.peq : [code]),
+    peqIn: (b, code) => Dsp.push(`peqin${b}.${code}`, c => Enc.peqIn(Dsp.s, b, c), code == null ? CODES.peq : [code]),
+    lim: (ch, code) => Dsp.push(`lim${ch}.${code}`, c => Enc.lim(Dsp.s, ch, c), code == null ? CODES.lim : [code]),
+    router: out => Dsp.push('router' + out, c => Enc.router(Dsp.s, c), out == null ? CODES.router : [out + 1]),
+    phase: ch => Dsp.push('phase' + ch, c => Enc.phase(Dsp.s, c), ch == null ? CODES.phase : [ch + 1]),
+    inLevel: code => Dsp.push('inlevel' + code, c => Enc.inLevel(Dsp.s, c), code == null ? CODES.inLevel : [code]),
+    freq: code => Dsp.push('freq' + code, c => Enc.freq(Dsp.s, c), code == null ? CODES.freq : [code]),
+    noise: code => Dsp.push('noise' + code, c => Enc.noise(Dsp.s, c), code == null ? CODES.noise : [code]),
+    sub: (ch, code) => Dsp.push(`sub${ch}.${code}`, c => Enc.sub(Dsp.s, ch, c), code == null ? CODES.sub : [code]),
+    seq: () => Dsp.push('seq', c => Enc.seq(Dsp.s, c), CODES.seq),
+    dimmer: () => Dsp.push('dimmer', () => Enc.dimmer(Dsp.s), [0]),
   },
-  allCommands() {
-    const s = this.s, list = [Enc.level(s), Enc.delay(s), Enc.phase(s), Enc.router(s), Enc.geq(s), Enc.inLevel(s), Enc.freq(s), Enc.seq(s), Enc.dimmer(s)];
-    for (let ch = 0; ch < D.OUTS; ch++) { list.push(Enc.xo(s, ch), Enc.lim(s, ch), Enc.sub(s, ch)); for (let b = 0; b < D.BANDS; b++) list.push(Enc.peqOut(s, ch, b)); }
-    for (let b = 0; b < D.BANDS; b++) list.push(Enc.peqIn(s, b));
+  allCommands(everyField = true) {
+    const s = this.s, list = [], all = (fn, codes) => (everyField ? codes : [codes[0]]).forEach(c => list.push(fn(c)));
+    all(c => Enc.level(s, c), CODES.level); all(c => Enc.delay(s, c), CODES.delay); all(c => Enc.phase(s, c), CODES.phase);
+    all(c => Enc.router(s, c), CODES.router); all(c => Enc.geq(s, c), CODES.geq); all(c => Enc.inLevel(s, c), CODES.inLevel);
+    all(c => Enc.freq(s, c), CODES.freq); all(c => Enc.seq(s, c), CODES.seq); list.push(Enc.dimmer(s));
+    for (let ch = 0; ch < D.OUTS; ch++) {
+      all(c => Enc.xo(s, ch, c), CODES.xo); all(c => Enc.lim(s, ch, c), CODES.lim); all(c => Enc.sub(s, ch, c), CODES.sub);
+      for (let b = 0; b < D.BANDS; b++) all(c => Enc.peqOut(s, ch, b, c), CODES.peq);
+    }
+    for (let b = 0; b < D.BANDS; b++) all(c => Enc.peqIn(s, b, c), CODES.peq);
     return list;
   },
   async sendAll(onProgress) {
-    const list = this.allCommands();
-    for (let i = 0; i < list.length; i++) { const [c, l, b3, f] = list[i]; await this.proto.dspWrite(c, l, b3, f); if (onProgress) onProgress(i + 1, list.length); }
+    const list = this.allCommands(true);
+    for (let i = 0; i < list.length; i++) { await this.write(list[i]); if (onProgress) onProgress(i + 1, list.length); }
     this.save(); this.emit('all');
   },
   // coloca o estado atual no simulador sem passar pela fila (modo demonstração)
-  seedSim(tr) { if (!tr || tr.failRate == null) return; tr.dsp = tr.dsp || new Map(); for (const [c, l, b3, f] of this.allCommands()) { const b = new Uint8Array(P.SIZE); b[1] = c; b[2] = l; b[3] = b3; f(b); tr.dsp.set(c, b); } },
+  seedSim(tr) { if (!tr || tr.failRate == null) return; tr.dsp = tr.dsp || new Map(); for (const [c, l, b3, f] of this.allCommands(false)) { const b = new Uint8Array(P.SIZE); b[1] = c; b[2] = l; b[3] = b3; f(b); tr.dsp.set(c, b); } },
   async readAll(onProgress) {
     const s = JSON.parse(JSON.stringify(this.s)); const jobs = [];
     const add = (enc, dec) => jobs.push({ enc, dec });
@@ -1342,8 +1389,8 @@ const Dsp = {
     let ok = 0;
     for (let i = 0; i < jobs.length; i++) {
       const [cmd, len, b3] = jobs[i].enc;
-      const r = await this.proto.dspRead(cmd, len, b3);
-      if (r) { jobs[i].dec(r); ok++; }
+      const r = await this.proto.dspRead(cmd, len, 0);
+      if (r) { jobs[i].dec(r); this.raw[cmd] = new Uint8Array(r.slice(0, P.SIZE)); ok++; }
       if (onProgress) onProgress(i + 1, jobs.length);
     }
     if (ok) { this.s = s; this.save(); this.emit('all'); }
@@ -1484,7 +1531,7 @@ const Assist = {
         add('a', `Sub tocando médios em ${nm(i)}`, 'Sem corte de agudos o sub "fala" e embola a voz. Sugestão: 80 Hz em 24 dB.', () => { x.lpF = 80; x.lpT = LR24; x.preset = 0; Dsp.send.xo(i); });
       if (role === 'sub' && (!x.hpT || x.hpF < 20))
         add('d', `Sem filtro subsônico em ${nm(i)}`, 'Um corte em 25–30 Hz protege o alto-falante de excursão inútil e ganha pressão útil.', () => { x.hpF = 28; x.hpT = XT('bt', 12); x.preset = 0; Dsp.send.xo(i); });
-      if (o.level > 0) add('a', `Nível acima de 0 dB em ${nm(i)}`, `Está em +${o.level} dB. Pode distorcer o sinal antes do módulo.`, () => { o.level = 0; Dsp.send.level(i); });
+      if (o.level > 0) add('a', `Nível acima de 0 dB em ${nm(i)}`, `Está em +${o.level} dB. Pode distorcer o sinal antes do módulo.`, () => { o.level = 0; Dsp.send.levelOut(i); });
       if (role === 'tweeter' && !o.lim.peakOn && !o.lim.rmsOn)
         add('d', `Limitador desligado no tweeter (${nm(i)})`, 'Ligue o limitador de pico para proteger em volume alto.', () => { o.lim.peakOn = true; o.lim.peakThr = -3; Dsp.send.lim(i); });
       const hot = o.peq.filter(p => p.on && p.g > 6);
@@ -1524,7 +1571,7 @@ const GENRES = [
   ['VAQUEJADA', ['vaquejada'], 'nordeste'],
   ['PAGODE', ['pagode', 'pagodao'], 'samba'],
   ['SAMBA', ['samba'], 'samba'],
-  ['SWINGUEIRA', ['swingueira'], 'samba'],
+  ['SWING', ['swing', 'swingueira'], 'samba'],
   ['SERTANEJO', ['sertanejo', 'sertaneja', 'modao', 'universitario'], 'sert'],
   ['ARROCHA', ['arrocha'], 'sert'],
   ['BREGA', ['brega', 'bregadeira'], 'brega'],
@@ -1566,6 +1613,8 @@ const Organizer = {
       const m = name.match(SEP_RX);
       const gSep = m && genreOf(m[1]);
       if (gSep) { scope = null; add(gSep.name, f, m[2].trim()); continue; }
+      // padrão "ESTILO - Artista" com estilo em maiúsculas que não está na lista: usa o próprio nome
+      if (m && m[1] === m[1].toUpperCase() && /[A-ZÀ-Ú]{3}/.test(m[1])) { scope = null; add(m[1].trim(), f, m[2].trim()); continue; }
       const g = genreOf(name);
       if (scope && (!g || g.fam === scope.fam || g.name === scope.name)) { add(scope.name, f, name); continue; }
       scope = null;
@@ -1644,7 +1693,9 @@ const Library = {
       for (const id of block) {
         const r = await proto.folder(id, this.priority.includes(id));
         if (token !== this._token) return;
-        this.folders[id] = r ? { ...r, id, loaded: true } : { id, name: `Pasta ${id + 1}`, first: 0, count: 0, loaded: true, failed: true };
+        this.folders[id] = r ? { ...r, id, loaded: true } : { id, name: `Pasta ${id}`, first: 0, count: 0, loaded: true, failed: true };
+        // pasta 0 = raiz do pendrive (sem nome): não é uma pasta de músicas quando existem outras
+        if (id === 0 && r && !r.name && this.folders.length > 1) this.folders[0].count = 0;
       }
       this.loadedFolders = this.folders.filter(f => f.loaded).length;
       this.reorganize(); this._save();
@@ -1692,94 +1743,75 @@ const Player = {
   listeners: new Set(), _lastPos: 0, _expect: 0, _busy: false,
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
   emit(w, d) { this.listeners.forEach(fn => { try { fn(w, d); } catch (e) { console.error(e); } }); },
-  attach(proto) { this.proto = proto; this._poll(); },
-  async _poll() {
-    let n = 0;
-    while (true) {
-      await sleep(1000);
-      if (!this.proto || this._busy) continue;
-      const t = await this.proto.time();
-      if (t) {
-        const jumped = this.dur && (t.total !== this.dur || t.cur + 2 < this._lastPos);
-        this.pos = t.cur; this.dur = t.total;
-        if (jumped && Date.now() > this._expect) this._onExternalChange();
-        else if (this.queue.length && this.playing && t.total && t.cur >= t.total - 1 && Date.now() > this._expect) this._playQueued();
-        this._lastPos = t.cur;
-      }
-      if (n % 3 === 0) {
-        const s = await this.proto.state(); if (s != null) this.playing = s === 1;
-        const fn = await this.proto.folderName(); if (fn != null) this.folderName = fn;
-      }
-      n++;
-      this.emit('tick');
-    }
+  volt: null,
+  attach(proto) {
+    this.proto = proto; proto.onEvent = b => this._event(b);
+    if (!this._watch) this._watch = setInterval(() => { const was = this.playing; this.playing = Date.now() - (this._posAt || 0) < 2600; if (was !== this.playing) this.emit('tick'); }, 1000);
   },
-  _onExternalChange() {
-    if (this.queue.length) return this._playQueued();
-    // o aparelho avançou sozinho: descobre a faixa nova
-    const t = this.proto.t;
-    if (t.peekIndex) this.idx = t.peekIndex();
-    else if (this.idx >= 0) {
-      const f = Library.folderOfSong(this.idx);
-      this.idx = this.mode === 1 ? this.idx : (f && this.mode === 2 && this.idx + 1 >= f.first + f.count ? f.first : this.idx + 1);
+  // avisos que o processador manda sozinho (confirmado na gravação do app oficial)
+  _event(b) {
+    if (b[1] === P.VOLT) { this.volt = u16(b, 3) / 100; this.emit('volt'); return; }
+    if (b[1] !== P.CMD) return;
+    const sub = b[3], idx = u16(b, 4);
+    if (sub === P.EV_TRACK) {
+      if (idx !== this.idx) {
+        const external = Date.now() > this._expect;
+        this.idx = idx; this.pos = 0; this._lastPos = 0;
+        if (external && this.queue.length) return this._playQueued();
+        this._pushHistory(idx); this.emit('track');
+      }
+    } else if (sub === P.EV_TIME) {
+      const pos = u16(b, 6), dur = u16(b, 10);
+      if (pos !== this.pos) this._posAt = Date.now();
+      this.pos = pos; this.dur = dur || this.dur;
+      if (idx !== this.idx && Date.now() > this._expect) { this.idx = idx; this._pushHistory(idx); this.emit('track'); }
+      if (this.queue.length && dur && pos >= dur - 1 && Date.now() > this._expect) this._playQueued();
+      this.emit('tick');
+    } else if (sub === P.EV_NAME) {
+      const n = latin1(b, 6); if (n && !Library.names.has(idx)) { Library.names.set(idx, n); }
+    } else if (sub === P.EV_FOLDER) {
+      this.folderName = latin1(b, 6);
     }
-    if (this.idx >= 0) this._pushHistory(this.idx);
-    this.emit('track');
   },
   _playQueued() { const it = this.queue.shift(); if (it) this.playTrack(this._resolve(it), { silent: true }); this.emit('queue'); },
   _resolve(it) { return typeof it === 'number' ? it : Library.resolve(it.k, it.i); },
+  // confere pelo aviso de "música atual" (código 21) que o processador manda ao trocar de faixa
   async _verify(target) {
-    const f = Library.folderOfSong(target);
-    for (let k = 0; k < 4; k++) {
-      await sleep(320);
-      const tr = this.proto.t;
-      if (tr.peekIndex) { if (tr.peekIndex() === target) return true; continue; }
-      const t = await this.proto.time(); const fn = await this.proto.folderName();
-      if (t && t.cur <= 4 && f && fn != null && norm(fn).slice(0, 14) === norm(f.name).slice(0, 14)) return true;
-    }
+    for (let k = 0; k < 16; k++) { await sleep(100); if (this.idx === target) return true; }
     return false;
   },
   async playTrack(idx, { silent = false } = {}) {
     if (idx == null || idx < 0 || !this.proto) return false;
-    this._busy = true; this._expect = Date.now() + 4000;
+    this._busy = true; this._expect = Date.now() + 6000;
     const pr = this.proto, data = [idx & 255, idx >> 8];
-    const cur = this.idx, curF = Library.folderOfSong(cur), tgtF = Library.folderOfSong(idx);
+    const cur = this.idx; if (cur === idx) this.idx = -1; // força a confirmação mesmo tocando a mesma
+    const curF = Library.folderOfSong(cur), tgtF = Library.folderOfSong(idx);
+    const play = () => pr.cmd(P.PLAY_ID, data, true, 1); // o app oficial manda "tocar" com tipo 1
     const ways = [
-      ['direto', () => pr.cmd(P.PLAY_ID, data)],
-      ['reenvio', async () => { await sleep(200); await pr.cmd(P.PLAY_ID, data); }],
-      ['fonte USB', async () => { await pr.cmd(P.SOURCE, [0]); await sleep(350); await pr.cmd(P.PLAY_ID, data); }],
-      ['pausa e play', async () => { await pr.cmd(P.PLAYPAUSE); await sleep(150); await pr.cmd(P.PLAY_ID, data); }],
+      ['direto', play],
+      ['reenvio', async () => { await sleep(200); await play(); }],
+      ['fonte USB', async () => { await pr.cmd(P.SOURCE, [0]); await sleep(350); await play(); }],
+      ['pausa e play', async () => { await pr.cmd(P.PLAYPAUSE); await sleep(150); await play(); }],
     ];
     if (cur >= 0 && curF && tgtF && curF.id === tgtF.id && Math.abs(idx - cur) <= 6 && idx !== cur)
       ways.push(['passo a passo', async () => { const d = idx - cur; for (let i = 0; i < Math.abs(d); i++) { await pr.cmd(d > 0 ? P.NEXT : P.PREV); await sleep(120); } }]);
     let ok = false, used = 0;
     for (let a = 0; a < ways.length && !ok; a++) { used = a; await ways[a][1](); ok = await this._verify(idx); }
     this._busy = false; this._expect = Date.now() + 2500;
+    if (!ok && this.idx === -1) this.idx = cur;
     if (ok) {
-      this.idx = idx; this.playing = true; this.pos = 0; this._lastPos = 0;
+      this.idx = idx; this.playing = true; this._posAt = Date.now(); this.pos = 0; this._lastPos = 0;
       this._pushHistory(idx);
       if (used > 0) this.emit('toast', { kind: 'ok', text: `Tocando. O aparelho ignorou o primeiro comando; resolvido por "${ways[used][0]}".` });
       this.emit('track');
     } else this.emit('toast', { kind: 'bad', text: silent ? 'A próxima da fila não tocou. Tente pela lista.' : 'Não consegui tocar essa faixa. Confira se o pendrive está na fonte USB.' });
     return ok;
   },
-  async toggle() { await this.proto.cmd(P.PLAYPAUSE); this.playing = !this.playing; this.emit('tick'); },
-  async next() {
-    if (this.queue.length) return this._playQueued();
-    this._expect = Date.now() + 2500; await this.proto.cmd(P.NEXT); await sleep(300);
-    const t = this.proto.t; this.idx = t.peekIndex ? t.peekIndex() : this.idx + 1; this._pushHistory(this.idx); this.emit('track');
-  },
-  async prev() {
-    this._expect = Date.now() + 2500; await this.proto.cmd(P.PREV); await sleep(300);
-    const t = this.proto.t; this.idx = t.peekIndex ? t.peekIndex() : Math.max(0, this.idx - 1); this.emit('track');
-  },
-  async folderStep(dir) {
-    this._expect = Date.now() + 2500; await this.proto.cmd(dir > 0 ? P.NEXT_FOLDER : P.PREV_FOLDER); await sleep(350);
-    const t = this.proto.t;
-    if (t.peekIndex) this.idx = t.peekIndex();
-    else { const fn = await this.proto.folderName(); const f = Library.folders.find(x => x && x.loaded && x.name === fn); if (f) this.idx = f.first; }
-    this._pushHistory(this.idx); this.emit('track');
-  },
+  async toggle() { await this.proto.cmd(P.PLAYPAUSE); this.playing = !this.playing; if (this.playing) this._posAt = Date.now(); else this._posAt = 0; this.emit('tick'); },
+  // próxima/anterior/pasta: o processador avisa a faixa nova sozinho (código 21)
+  async next() { if (this.queue.length) return this._playQueued(); await this.proto.cmd(P.NEXT); },
+  async prev() { await this.proto.cmd(P.PREV); },
+  async folderStep(dir) { await this.proto.cmd(dir > 0 ? P.NEXT_FOLDER : P.PREV_FOLDER); },
   async setMode(m) { this.mode = m; await this.proto.cmd(P.MODE, [m]); this.emit('tick'); },
   async setVolume(v) { this.vol = v; clearTimeout(this._vt); this._vt = setTimeout(() => this.proto.cmd(P.VOLUME_SET, [v]), 120); },
   async seek(pct) { this._expect = Date.now() + 2500; await this.proto.cmd(P.SEEK, [Math.round(pct * 100)]); this.pos = Math.round(this.dur * pct); this._lastPos = this.pos; this.emit('tick'); },
@@ -1884,6 +1916,7 @@ const UI = {
     this.buildMini(); this.buildFs();
     Library.on((w, d) => this.onLib(w, d));
     Player.on((w, d) => this.onPlayer(w, d));
+    Player.on(w => { if (w !== 'volt') return; const el = $('#volt'); if (!el) return; const v = Player.volt; el.classList.remove('hidden'); el.className = 'pill ' + (v < 11.8 ? 'bad' : v < 12.4 ? 'warn' : 'ok'); el.replaceChildren(h('i'), v.toFixed(2).replace('.', ',') + ' V'); });
     Dsp.on(w => { if (w === 'sync' && this.cur().v === 'dsp' && Dsp.syncing && Dsp.syncProgress && Dsp.syncProgress[0] % 8 === 0) this.refresh(); });
     Dsp.on(w => { const el = $('#sendfx'); if (el && w === 'send') { el.classList.toggle('on', Dsp.sending > 0); el.lastChild.textContent = Dsp.sending > 0 ? 'Enviando…' : 'Ajustes enviados na hora'; } });
     setInterval(() => this.tickClock(), 1000); this.tickClock();
@@ -2419,6 +2452,7 @@ const UI = {
       msg);
     const close = this.modal({ title: 'Conexão com o processador', body, actions: [
       { label: 'Registro da conexão', onClick: () => { setTimeout(() => this.connLog(), 0); } },
+      Store.get('stxPwd', null) ? { label: 'Esquecer senha', onClick: () => { Store.set('stxPwd', null); this.toast('Senha apagada. Na próxima conexão o app pede de novo.', 'ok'); } } : null,
       real ? { label: 'Voltar à demonstração', onClick: () => App.backToDemo() } : null,
       real && tr.connected ? { label: 'Desconectar', onClick: () => { tr.disconnect(); App.paintConn(); } } : null,
       { label: real && tr.connected ? 'Conectar outro' : 'Conectar', kind: 'primary', onClick: () => {
@@ -2546,18 +2580,65 @@ const App = {
   useTransport(tr) {
     this.transport = tr;
     this.proto = new StxProtocol(tr);
-    Player.proto = this.proto; Player.idx = -1; Player.queue = [];
+    Player.attach(this.proto); Player.idx = -1; Player.queue = []; Player.volt = null;
     Dsp.proto = this.proto; Dsp.synced = !(tr instanceof BleTransport);
     this.paintConn();
     Library.scan(this.proto);
     if (UI.cur().v === 'dsp' || UI.cur().v === 'lib') UI.refresh();
   },
+  // senha do processador: 4 dígitos + código de conferência (mesma conta do app oficial)
+  passPacket(pwd) {
+    const b = new Uint8Array(P.SIZE); b[0] = 1; b[1] = P.PASS; b[2] = 0x0D; b[3] = 0;
+    const c = [...pwd].map(ch => ch.charCodeAt(0)); c.forEach((x, i) => { b[4 + i] = x; });
+    const v = c[0] * c[1] + c[0] * c[1] * c[2] * c[3] - c[2] + c[3];
+    b[12] = v & 255; b[13] = (v >> 8) & 255; b[14] = (v >> 16) & 255; b[15] = (v >>> 24) & 255;
+    return b;
+  },
+  // garante a conexão aberta antes de mandar a senha (o processador derruba em ~20 s sem senha)
+  async _ensureOpen(tr) {
+    if (!tr || !(tr instanceof BleTransport) || tr.connected) return true;
+    try { ConnLog.add('i', null, 'Reabrindo a conexão para enviar a senha…'); tr._busy = true; await tr._open(); return true; }
+    catch (e) { ConnLog.add('err', null, e.message); return false; }
+    finally { tr._busy = false; }
+  },
+  async _tryPwd(proto, pwd) {
+    if (!(await this._ensureOpen(proto.t || proto.transport))) return null;
+    const r = await proto.sendWait(this.passPacket(pwd), b => b[1] === P.PASS, 2000);
+    ConnLog.add('i', null, r ? `Senha ${pwd.replace(/./g, '•')}: ${r[3] === 1 ? 'aceita' : 'recusada'}` : 'Sem resposta à senha');
+    return r;
+  },
+  async unlock(proto) {
+    if (this._unlocking) return this._unlocking;
+    this._unlocking = (async () => {
+      const saved = Store.get('stxPwd', null);
+      const tries = [...new Set([saved, '1234'].filter(Boolean))];
+      for (const pwd of tries) {
+        const r = await this._tryPwd(proto, pwd);
+        if (!r) return true; // aparelho sem senha / não respondeu: segue
+        if (r[3] === 1) { Store.set('stxPwd', pwd); return true; }
+        if (pwd === saved) Store.set('stxPwd', null);
+      }
+      // pede a senha que a pessoa usa no app oficial (se cair enquanto digita, reconecta sozinho)
+      for (let k = 0; k < 3; k++) {
+        const pwd = await UI.ask('Senha do processador', 'A mesma senha do app oficial STX DSP (4 números)');
+        if (!pwd) return false;
+        if (!/^\d{4}$/.test(pwd.trim())) { UI.toast('A senha tem 4 números.', 'bad'); continue; }
+        const r = await this._tryPwd(proto, pwd.trim());
+        if (r && r[3] === 1) { Store.set('stxPwd', pwd.trim()); UI.toast('Senha aceita.', 'ok'); return true; }
+        UI.toast(r ? 'Senha recusada pelo processador.' : 'O processador não respondeu à senha.', 'bad');
+      }
+      return false;
+    })();
+    try { return await this._unlocking; } finally { this._unlocking = null; }
+  },
   async connectBle() {
     if (!BleTransport.available()) throw new Error('Este navegador não tem Bluetooth web. Abra o app pelo Chrome, no link https.');
     const tr = new BleTransport();
     tr.onStatus = () => { this.paintConn(); if (tr.state === 'off' && this.transport === tr) UI.toast('Processador desconectado.', 'bad'); };
-    tr.onReconnect = () => { UI.toast('Reconectado.', 'ok'); Library.scan(this.proto); };
+    tr.onReconnect = async () => { if (this._unlocking) return; if (await this.unlock(this.proto)) { UI.toast('Reconectado.', 'ok'); Library.scan(this.proto); } };
     await tr.connect();
+    const proto = new StxProtocol(tr);
+    if (!(await this.unlock(proto))) { tr.disconnect(); throw new Error('Senha não confirmada.'); }
     this.useTransport(tr);
     UI.toast(`Conectado em ${tr.name}.`, 'ok');
     this.syncDsp();
@@ -2698,22 +2779,22 @@ Object.assign(UI, {
     body.append(
       h('div', { class: 'panel', style: { display: 'flex', gap: '18px', alignItems: 'center', flexWrap: 'wrap', marginBottom: '14px' } },
         h('b', { style: { fontFamily: 'var(--font-display)', fontSize: '16px' } }, 'Geral'),
-        this.tog(s.masterOn ? 'MASTER LIGADO' : 'MASTER', s.masterOn, v => { s.masterOn = v; Dsp.send.level(8); }),
-        h('div', { style: { flex: '1', minWidth: '260px' } }, this.ctl('Volume principal', s.main, { min: 0, max: 40 }, v => { s.main = v; Dsp.send.level(8); }))),
+        this.tog(s.masterOn ? 'MASTER LIGADO' : 'MASTER', s.masterOn, v => { s.masterOn = v; Dsp.send.level(1); }),
+        h('div', { style: { flex: '1', minWidth: '260px' } }, this.ctl('Volume principal', s.main, { min: 0, max: 100 }, v => { s.main = v; Dsp.send.level(2); }))),
       h('div', { class: 'mixer' }, s.outs.map((o, i) => {
         const val = h('div', { class: 'val num' }, (o.level > 0 ? '+' : '') + o.level.toFixed(1));
         const fd = h('input', { type: 'range', min: -40, max: 6, step: .5, value: o.level, 'aria-label': 'Nível ' + o.name });
-        fd.oninput = () => { o.level = +fd.value; val.textContent = (o.level > 0 ? '+' : '') + o.level.toFixed(1); Dsp.send.level(i); };
+        fd.oninput = () => { o.level = +fd.value; val.textContent = (o.level > 0 ? '+' : '') + o.level.toFixed(1); Dsp.send.levelOut(i); };
         const dl = h('input', { type: 'number', min: 0, max: 20, step: .1, value: o.delay, 'aria-label': 'Delay ' + o.name });
         const cm = h('span', {}, `${Math.round(o.delay * 34.3)} cm`);
-        dl.onchange = () => { o.delay = clamp(Math.round((parseFloat(dl.value) || 0) * 10) / 10, 0, 20); dl.value = o.delay; cm.textContent = `${Math.round(o.delay * 34.3)} cm`; Dsp.send.delay(); };
+        dl.onchange = () => { o.delay = clamp(Math.round((parseFloat(dl.value) || 0) * 10) / 10, 0, 20); dl.value = o.delay; cm.textContent = `${Math.round(o.delay * 34.3)} cm`; Dsp.send.delay(i); };
         const x = o.xo;
         return h('div', { class: 'strip', style: `--c:${D.COLORS[i]}` },
           h('button', { class: 'nm', title: 'Renomear', onclick: async () => { const n = await this.ask('Nome da saída ' + (i + 1), 'Ex.: Tweeter E', o.name); if (n) { o.name = n; Dsp.save(); this.refresh(); } } }, `${i + 1}. ${o.name}`),
           h('div', { class: 'role' }, ROLE_NAMES[Dsp.role(o)]),
           h('div', { class: 'fader' }, fd, h('div', { class: 'scale', 'aria-hidden': 'true' }, ['+6', '0', '-10', '-20', '-30', '-40'].map(t => h('span', {}, t)))),
           val,
-          h('div', { class: 'row2' }, this.tog('ON', o.on, v => { o.on = v; Dsp.send.level(i); }), this.tog('180°', o.phase, v => { o.phase = v; Dsp.send.phase(); }, 'warn')),
+          h('div', { class: 'row2' }, this.tog('ON', o.on, v => { o.on = v; Dsp.send.levelOn(i); }), this.tog('180°', o.phase, v => { o.phase = v; Dsp.send.phase(i); }, 'warn')),
           h('div', { class: 'numbox', style: { width: '100%' } }, dl, h('span', {}, 'ms')),
           h('div', { class: 'smini' }, cm, h('br'), h('b', {}, x.hpT ? fmtHz(x.hpF) : '—'), ' a ', h('b', {}, x.lpT ? fmtHz(x.lpF) : '—'), ' Hz'));
       })),
@@ -2726,7 +2807,7 @@ Object.assign(UI, {
     const gr = this.graph({ height: 290, min: -36, max: 12, legend: s.outs.map((oo, i) => [D.COLORS[i], `${i + 1} ${oo.name}`]),
       draw: (c, G) => { s.outs.forEach((oo, i) => { if (!oo.on) return; G.curve(c, f => Resp.out(oo, f, false), D.COLORS[i] + (i === this.dspCh ? '' : '88'), i === this.dspCh ? 3 : 1.6, i === this.dspCh); }); } });
     const repaint = () => { gr.G.paint(); };
-    const set = (k, v) => { x[k] = v; x.preset = 0; presetSel.value = 0; Dsp.send.xo(ch); repaint(); };
+    const set = (k, v) => { x[k] = v; Dsp.send.xo(ch, XO_CODE[k]); repaint(); };
     const presetSel = h('select', { class: 'sel' }, D.XO_PRESETS.map((p, i) => h('option', { value: i, selected: i === x.preset }, i === 0 ? 'Personalizado / faixa inteira' : p.n)));
     presetSel.onchange = () => { const p = D.XO_PRESETS[+presetSel.value]; x.preset = +presetSel.value; [x.hpF, x.hpT] = p.hp; [x.lpF, x.lpT] = p.lp; Dsp.send.xo(ch); this.refresh(); };
     body.append(this.chips(), gr,
@@ -2752,7 +2833,7 @@ Object.assign(UI, {
       },
       drag: {
         pick: (p, G) => { let best = null, bd = 28; bands.forEach((b, i) => { if (!b.on) return; const d = Math.hypot(G.x(b.f) - p.x, G.y(b.type ? b.g / 2 : b.g) - p.y); if (d < bd) { bd = d; best = i; } }); if (best != null) { self.peqSel = best; } return best; },
-        move: (i, f, db) => { const b = bands[i]; b.f = f; b.g = clamp(Math.round((b.type ? db * 2 : db) * 10) / 10, -12, 12); sendBand(i); syncRow(i); },
+        move: (i, f, db) => { const b = bands[i]; b.f = f; b.g = clamp(Math.round((b.type ? db * 2 : db) * 10) / 10, -12, 12); sendBand(i, PEQ_CODE.f); sendBand(i, PEQ_CODE.g); syncRow(i); },
         end: () => drawRows(),
       } });
     const rows = h('div', { class: 'peq-table' });
@@ -2761,15 +2842,15 @@ Object.assign(UI, {
     const drawRows = () => {
       rows.replaceChildren(); rowEls.length = 0;
       bands.forEach((b, i) => {
-        const num = (val, min, max, step, unit, on) => { const inp = h('input', { type: 'number', min, max, step, value: val, inputmode: 'decimal' }); inp.onchange = () => { const v = clamp(parseFloat(inp.value) || 0, min, max); inp.value = v; on(v); sendBand(i); gr.G.paint(); }; return [h('div', { class: 'numbox' }, inp, h('span', {}, unit)), inp]; };
-        const [fBox, fIn] = num(b.f, 20, 20000, 1, 'Hz', v => { b.f = Math.round(v); });
-        const [gBox, gIn] = num(b.g.toFixed(1), -12, 12, .1, 'dB', v => { b.g = v; });
-        const [qBox] = num(b.q, .4, 25, .1, 'Q', v => { b.q = v; });
+        const num = (val, min, max, step, unit, on, code) => { const inp = h('input', { type: 'number', min, max, step, value: val, inputmode: 'decimal' }); inp.onchange = () => { const v = clamp(parseFloat(inp.value) || 0, min, max); inp.value = v; on(v); sendBand(i, code); gr.G.paint(); }; return [h('div', { class: 'numbox' }, inp, h('span', {}, unit)), inp]; };
+        const [fBox, fIn] = num(b.f, 20, 20000, 1, 'Hz', v => { b.f = Math.round(v); }, PEQ_CODE.f);
+        const [gBox, gIn] = num(b.g.toFixed(1), -12, 12, .1, 'dB', v => { b.g = v; }, PEQ_CODE.g);
+        const [qBox] = num(b.q, .4, 25, .1, 'Q', v => { b.q = v; }, PEQ_CODE.q);
         const ty = h('select', { class: 'sel ty' }, D.PEQ_TYPES.map((t, k) => h('option', { value: k, selected: k === b.type }, t)));
-        ty.onchange = () => { b.type = +ty.value; sendBand(i); gr.G.paint(); };
+        ty.onchange = () => { b.type = +ty.value; sendBand(i, PEQ_CODE.type); gr.G.paint(); };
         const row = h('div', { class: 'peq-row' + (i === this.peqSel ? ' sel' : ''), onclick: () => { if (this.peqSel !== i) { this.peqSel = i; rows.querySelectorAll('.peq-row').forEach((r, k) => r.classList.toggle('sel', k === i)); gr.G.paint(); } } },
           h('span', { class: 'n', style: { background: D.COLORS[i] } }, i + 1),
-          this.tog('ON', b.on, v => { b.on = v; sendBand(i); gr.G.paint(); }),
+          this.tog('ON', b.on, v => { b.on = v; sendBand(i, PEQ_CODE.on); gr.G.paint(); }),
           fBox, gBox, h('div', { class: 'q' }, qBox), ty);
         rowEls[i] = { f: fIn, g: gIn }; rows.append(row);
       });
@@ -2784,7 +2865,7 @@ Object.assign(UI, {
   pPeq(body) {
     const ch = this.dspCh, o = Dsp.s.outs[ch];
     body.append(this.chips());
-    this.peqEditor(body, o.peq, o, b => Dsp.send.peqOut(ch, b), D.COLORS[ch]);
+    this.peqEditor(body, o.peq, o, (b, code) => Dsp.send.peqOut(ch, b, code), D.COLORS[ch]);
   },
 
   /* ---------- EQ GRÁFICO 15 bandas ---------- */
@@ -2797,7 +2878,7 @@ Object.assign(UI, {
       bandsEl.replaceChildren(...D.GEQ_F.map((f, i) => {
         const v = h('b', { class: 'num' }, (g.g[i] > 0 ? '+' : '') + g.g[i].toFixed(1));
         const r = h('input', { type: 'range', min: -12, max: 12, step: .5, value: g.g[i], 'aria-label': fmtHz(f) + ' Hz' });
-        r.oninput = () => { g.g[i] = +r.value; g.preset = 12; v.textContent = (g.g[i] > 0 ? '+' : '') + g.g[i].toFixed(1); Dsp.send.geq(); gr.G.paint(); };
+        r.oninput = () => { g.g[i] = +r.value; v.textContent = (g.g[i] > 0 ? '+' : '') + g.g[i].toFixed(1); Dsp.send.geq(i); gr.G.paint(); };
         return h('div', { class: 'bd' }, v, r, h('small', {}, fmtHz(f)));
       }));
     };
@@ -2809,19 +2890,19 @@ Object.assign(UI, {
 
   /* ---------- LIMITADOR ---------- */
   pLim(body) {
-    const ch = this.dspCh, l = Dsp.s.outs[ch].lim, send = () => Dsp.send.lim(ch);
+    const ch = this.dspCh, l = Dsp.s.outs[ch].lim, send = code => Dsp.send.lim(ch, code);
     body.append(this.chips(), h('div', { class: 'cols' },
       h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } }, h('h3', { style: { margin: 0 } }, 'RMS (potência média)'),
-        h('div', { style: { display: 'flex', gap: '6px' } }, this.tog('LIGADO', l.rmsOn, v => { l.rmsOn = v; send(); }), this.tog('AUTO', l.rmsAuto, v => { l.rmsAuto = v; send(); }, 'warn'))),
-        this.ctl('Limiar', l.rmsThr, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { l.rmsThr = v; send(); }),
-        this.ctl('Ataque', l.att, { min: .1, max: 200, step: .1, unit: 'ms', dec: 1 }, v => { l.att = v; send(); }),
-        this.ctl('Segurar', l.rmsHold, { min: 0, max: 1000, unit: 'ms' }, v => { l.rmsHold = v; send(); }),
-        this.ctl('Soltar', l.rmsRel, { min: 10, max: 5000, unit: 'ms' }, v => { l.rmsRel = v; send(); })),
+        h('div', { style: { display: 'flex', gap: '6px' } }, this.tog('LIGADO', l.rmsOn, v => { l.rmsOn = v; send(1); }), this.tog('AUTO', l.rmsAuto, v => { l.rmsAuto = v; send(1); }, 'warn'))),
+        this.ctl('Limiar', l.rmsThr, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { l.rmsThr = v; send(LIM_CODE.rmsThr); }),
+        this.ctl('Ataque', l.att, { min: .1, max: 200, step: .1, unit: 'ms', dec: 1 }, v => { l.att = v; send(LIM_CODE.att); }),
+        this.ctl('Segurar', l.rmsHold, { min: 0, max: 1000, unit: 'ms' }, v => { l.rmsHold = v; send(LIM_CODE.rmsHold); }),
+        this.ctl('Soltar', l.rmsRel, { min: 10, max: 5000, unit: 'ms' }, v => { l.rmsRel = v; send(LIM_CODE.rmsRel); })),
       h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' } }, h('h3', { style: { margin: 0 } }, 'Pico (proteção rápida)'),
-        h('div', { style: { display: 'flex', gap: '6px' } }, this.tog('LIGADO', l.peakOn, v => { l.peakOn = v; send(); }), this.tog('AUTO', l.peakAuto, v => { l.peakAuto = v; send(); }, 'warn'))),
-        this.ctl('Limiar', l.peakThr, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { l.peakThr = v; send(); }),
-        this.ctl('Segurar', l.peakHold, { min: 0, max: 1000, unit: 'ms' }, v => { l.peakHold = v; send(); }),
-        this.ctl('Soltar', l.peakRel, { min: 10, max: 5000, unit: 'ms' }, v => { l.peakRel = v; send(); }),
+        h('div', { style: { display: 'flex', gap: '6px' } }, this.tog('LIGADO', l.peakOn, v => { l.peakOn = v; send(1); }), this.tog('AUTO', l.peakAuto, v => { l.peakAuto = v; send(1); }, 'warn'))),
+        this.ctl('Limiar', l.peakThr, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { l.peakThr = v; send(LIM_CODE.peakThr); }),
+        this.ctl('Segurar', l.peakHold, { min: 0, max: 1000, unit: 'ms' }, v => { l.peakHold = v; send(LIM_CODE.peakHold); }),
+        this.ctl('Soltar', l.peakRel, { min: 10, max: 5000, unit: 'ms' }, v => { l.peakRel = v; send(LIM_CODE.peakRel); }),
         h('p', { style: { color: 'var(--muted)', fontSize: '13px', margin: '8px 0 0' } }, 'Dica: em tweeter e médio, pico ligado entre −3 e −6 dB evita queimar em volume alto.'))));
   },
 
@@ -2832,7 +2913,7 @@ Object.assign(UI, {
       h('thead', {}, h('tr', {}, h('th', { class: 'rowh' }, 'Saída  ←  Fonte'), D.SOURCES.map(([, n]) => h('th', {}, n)))),
       h('tbody', {}, s.outs.map((o, i) => h('tr', {}, h('th', { class: 'rowh' }, h('span', { style: { color: D.COLORS[i] } }, '● '), `${i + 1}. ${o.name}`),
         D.SOURCES.map(([k]) => h('td', {}, (() => { const b = h('button', { class: 'mx' + (o.route[k] ? ' on' : ''), 'aria-pressed': o.route[k] ? 'true' : 'false', 'aria-label': `${o.name} recebe ${k}` }, ic('check'));
-          b.onclick = () => { o.route[k] = !o.route[k]; b.classList.toggle('on', o.route[k]); Dsp.send.router(); }; return b; })()))))));
+          b.onclick = () => { o.route[k] = !o.route[k]; b.classList.toggle('on', o.route[k]); Dsp.send.router(i); }; return b; })()))))));
     body.append(h('div', { class: 'panel', style: { overflowX: 'auto' } }, h('h3', {}, 'Qual entrada toca em cada saída'), tbl,
       h('p', { style: { color: 'var(--muted)', fontSize: '13px', margin: '10px 0 0' } }, 'Marque mais de uma fonte para somar (ex.: sub recebendo Player E + Player D vira mono).')));
   },
@@ -2842,10 +2923,10 @@ Object.assign(UI, {
     const il = Dsp.s.inLevel;
     body.append(h('div', { class: 'panel', style: { marginBottom: '14px' } }, h('h3', {}, 'Nível das entradas'),
       ['Entrada A', 'Entrada B', 'Entrada C', 'Entrada D', 'Player (USB/BT)'].map((n, i) => h('div', { style: { display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '12px', alignItems: 'center' } },
-        this.tog('ON', il.on[i], v => { il.on[i] = v; Dsp.send.inLevel(); }),
-        this.ctl(n, il.lv[i], { min: -40, max: 6, step: i < 4 ? .5 : 1, unit: 'dB', dec: i < 4 ? 1 : 0 }, v => { il.lv[i] = v; Dsp.send.inLevel(); })))),
+        this.tog('ON', il.on[i], v => { il.on[i] = v; Dsp.send.inLevel(i + 12); }),
+        this.ctl(n, il.lv[i], { min: -40, max: 6, step: i < 4 ? .5 : 1, unit: 'dB', dec: i < 4 ? 1 : 0 }, v => { il.lv[i] = v; Dsp.send.inLevel(i < 4 ? i * 2 + 2 : 8); })))),
       h('div', { class: 'section-title' }, h('h2', {}, 'Paramétrico da entrada'), h('small', {}, 'Vale para todas as saídas')));
-    this.peqEditor(body, Dsp.s.inPeq, null, b => Dsp.send.peqIn(b), '#ffb23f');
+    this.peqEditor(body, Dsp.s.inPeq, null, (b, code) => Dsp.send.peqIn(b, code), '#ffb23f');
   },
 
   /* ---------- EXTRAS ---------- */
@@ -2855,15 +2936,15 @@ Object.assign(UI, {
       h('div', { class: 'panel' }, h('h3', {}, 'Subgrave (subharmônico) por saída'),
         h('p', { style: { color: 'var(--muted)', fontSize: '13px', margin: '0 0 8px' } }, 'Cria grave uma oitava abaixo. Use só nos subs, com moderação.'),
         s.outs.map((o, i) => h('div', { style: { borderTop: '1px solid var(--line)', padding: '8px 0' } },
-          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('b', {}, h('span', { style: { color: D.COLORS[i] } }, '● '), `${i + 1}. ${o.name}`), this.tog('LIGADO', o.sub.on, v => { o.sub.on = v; Dsp.send.sub(i); })),
-          o.sub.on ? [this.ctl('Frequência', o.sub.freq, { min: 20, max: 120, unit: 'Hz' }, v => { o.sub.freq = v; Dsp.send.sub(i); }),
-            this.ctl('Ganho', o.sub.gain, { min: 0, max: 12, step: .5, unit: 'dB', dec: 1 }, v => { o.sub.gain = v; Dsp.send.sub(i); })] : null))),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('b', {}, h('span', { style: { color: D.COLORS[i] } }, '● '), `${i + 1}. ${o.name}`), this.tog('LIGADO', o.sub.on, v => { o.sub.on = v; Dsp.send.sub(i, 1); })),
+          o.sub.on ? [this.ctl('Frequência', o.sub.freq, { min: 20, max: 120, unit: 'Hz' }, v => { o.sub.freq = v; Dsp.send.sub(i, 2); }),
+            this.ctl('Ganho', o.sub.gain, { min: 0, max: 12, step: .5, unit: 'dB', dec: 1 }, v => { o.sub.gain = v; Dsp.send.sub(i, 3); })] : null))),
       h('div', { style: { display: 'flex', flexDirection: 'column', gap: '14px' } },
-        h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('h3', { style: { margin: 0 } }, 'Realce de frequência'), this.tog('LIGADO', s.freq.on, v => { s.freq.on = v; Dsp.send.freq(); })),
-          this.ctl('Frequência', s.freq.f, { min: 20, max: 20000, log: true, unit: 'Hz' }, v => { s.freq.f = v; Dsp.send.freq(); }),
-          this.ctl('Ganho', s.freq.g, { min: -12, max: 12, step: .5, unit: 'dB', dec: 1 }, v => { s.freq.g = v; Dsp.send.freq(); })),
-        h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('h3', { style: { margin: 0 } }, 'Ruído rosa (para medir)'), this.tog('LIGADO', s.noise.on, v => { s.noise.on = v; Dsp.send.noise(); if (v) this.toast('Ruído rosa ligado. Comece com o volume baixo.', 'ok'); }, 'warn')),
-          this.ctl('Volume', s.noise.g, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { s.noise.g = v; Dsp.send.noise(); })),
+        h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('h3', { style: { margin: 0 } }, 'Realce de frequência'), this.tog('LIGADO', s.freq.on, v => { s.freq.on = v; Dsp.send.freq(1); })),
+          this.ctl('Frequência', s.freq.f, { min: 20, max: 20000, log: true, unit: 'Hz' }, v => { s.freq.f = v; Dsp.send.freq(4); }),
+          this.ctl('Ganho', s.freq.g, { min: -12, max: 12, step: .5, unit: 'dB', dec: 1 }, v => { s.freq.g = v; Dsp.send.freq(2); })),
+        h('div', { class: 'panel' }, h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } }, h('h3', { style: { margin: 0 } }, 'Ruído rosa (para medir)'), this.tog('LIGADO', s.noise.on, v => { s.noise.on = v; Dsp.send.noise(1); if (v) this.toast('Ruído rosa ligado. Comece com o volume baixo.', 'ok'); }, 'warn')),
+          this.ctl('Volume', s.noise.g, { min: -40, max: 0, step: .5, unit: 'dB', dec: 1 }, v => { s.noise.g = v; Dsp.send.noise(2); })),
         h('div', { class: 'panel' }, h('h3', {}, 'Sequenciador dos remotos'),
           h('div', { style: { display: 'flex', gap: '6px', marginBottom: '6px' } }, s.seq.outs.map((v, i) => this.tog('REMOTO ' + (i + 1), v, x => { s.seq.outs[i] = x; Dsp.send.seq(); }))),
           this.ctl('Liga após', s.seq.on, { min: .5, max: 60, step: .5, unit: 's', dec: 1 }, v => { s.seq.on = v; Dsp.send.seq(); }),
@@ -2972,7 +3053,7 @@ Object.assign(UI, {
           h('li', {}, 'Ligue o ruído rosa com o volume baixo e suba até ficar forte, sem distorcer.'),
           h('li', {}, 'Toque em "Medir 10 s". Para ficar mais preciso, mude um pouco a posição e meça de novo: as medições somam.')),
         h('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
-          this.tog(s.noise.on ? 'RUÍDO ROSA LIGADO' : 'RUÍDO ROSA', s.noise.on, v => { s.noise.on = v; Dsp.send.noise(); }, 'warn'),
+          this.tog(s.noise.on ? 'RUÍDO ROSA LIGADO' : 'RUÍDO ROSA', s.noise.on, v => { s.noise.on = v; Dsp.send.noise(1); }, 'warn'),
           h('button', { class: 'btn', onclick: async () => {
             if (Assist.rta.running) { Assist.stopMic(); status.textContent = 'Microfone desligado.'; return; }
             try { await Assist.startMic(); status.textContent = 'Microfone ligado. Ouvindo…'; if (!loop) loop = requestAnimationFrame(tick); }
@@ -2997,7 +3078,6 @@ Object.assign(UI, {
     calc();
   },
 });
-
 
 })();
 </script>
